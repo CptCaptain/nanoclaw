@@ -74,6 +74,26 @@ Keep messages clean and readable for WhatsApp.
 
 This is the **main channel**, which has elevated privileges.
 
+## Logs
+
+When asked to show logs, check these locations:
+
+**Container Logs** (agent execution logs):
+- Located in `/workspace/project/groups/main/logs/`
+- Named `container-<timestamp>.log`
+- Show the most recent: `ls -t /workspace/project/groups/main/logs/ | head -5`
+- Read specific log: `cat /workspace/project/groups/main/logs/<filename>`
+
+**Service Logs** (main process):
+- PID can be found with: `ps aux | grep "node.*index.js" | grep -v grep`
+- No persistent log file - goes to container stdout
+- Check with: journalctl or container logs command (if running in Docker)
+
+**Useful commands:**
+- Last 50 lines of newest container log: `ls -t /workspace/project/groups/main/logs/*.log | head -1 | xargs tail -50`
+- Search for errors: `grep -i error /workspace/project/groups/main/logs/*.log | tail -20`
+- Restart logs from entrypoint: Check container stdout for "[Starting node process...]" messages
+
 ## Container Mounts
 
 Main has read-only access to the project and read-write access to its group folder:
