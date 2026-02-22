@@ -50,10 +50,51 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Create entrypoint script
+# Create entrypoint script with auto-restart loop
 # Secrets are passed via stdin JSON — temp file is deleted immediately after Node reads it
 # Follow-up messages arrive via IPC files in /workspace/ipc/input/
-RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+RUN cat > /app/entrypoint.sh <<'EOF'
+#!/bin/bash
+set -e
+cd /app && npx tsc --outDir /tmp/dist 2>&1 >&2
+ln -s /app/node_modules /tmp/dist/node_modules
+chmod -R a-w /tmp/dist
+
+# Save input once at startup
+cat > /tmp/input.json
+
+# Restart loop protection
+MAX_RESTARTS_PER_MINUTE=10
+RESTART_COUNT=0
+RESTART_WINDOW_START=$(date +%s)
+
+# Auto-restart loop
+while true; do
+  echo "[$(date -Iseconds)] Starting node process..."
+  node /tmp/dist/index.js < /tmp/input.json
+  EXIT_CODE=$?
+  echo "[$(date -Iseconds)] Node exited with code $EXIT_CODE"
+
+  # Check for restart loop
+  CURRENT_TIME=$(date +%s)
+  TIME_DIFF=$((CURRENT_TIME - RESTART_WINDOW_START))
+
+  if [ $TIME_DIFF -lt 60 ]; then
+    RESTART_COUNT=$((RESTART_COUNT + 1))
+    if [ $RESTART_COUNT -ge $MAX_RESTARTS_PER_MINUTE ]; then
+      echo "[$(date -Iseconds)] ERROR: Too many restarts ($RESTART_COUNT in ${TIME_DIFF}s). Possible crash loop. Exiting."
+      exit 1
+    fi
+  else
+    # Reset counter if we're past the window
+    RESTART_COUNT=1
+    RESTART_WINDOW_START=$CURRENT_TIME
+  fi
+
+  sleep 1
+done
+EOF
+RUN chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace && chmod 777 /home/node
