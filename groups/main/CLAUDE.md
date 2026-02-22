@@ -18,6 +18,21 @@ Your output is sent to the user or group.
 
 You also have `mcp__nanoclaw__send_message` which sends a message immediately while you're still working. This is useful when you want to acknowledge a request before starting longer work.
 
+### Progress Updates
+
+**IMPORTANT**: Keep the user informed about what you're doing:
+
+1. **When starting a task**: Let the user know you're beginning work
+2. **During progress**: Report when you reach milestones or complete significant steps
+3. **When finished**: Confirm completion with a summary of what was done
+
+Example:
+- "Ich fange an, die Logs zu analysieren..."
+- "Database-Schema gefixt, jetzt rebuilde ich den Code..."
+- "Fertig! Alle Änderungen sind committed."
+
+Don't work in silence - regular updates help the user understand what's happening.
+
 ### Internal thoughts
 
 If part of your output is internal reasoning rather than something for the user, wrap it in `<internal>` tags:
