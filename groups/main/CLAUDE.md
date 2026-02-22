@@ -287,3 +287,25 @@ Example workflow:
 - `git add` the specific files changed
 - `git commit` with a descriptive message
 - Continue with next task
+
+### Service Restart After Code Changes
+
+After modifying and building code, automatically restart the service:
+
+1. **Before restart**: Calculate hashes of old and new build
+2. **Send pre-restart message**:
+   ```
+   Service-Neustart - <changed-files>: <brief-description>
+   Aktueller Build: <old-hash>
+   Neuer Build: <new-hash>
+   Bin gleich zurück...
+   ```
+3. **Kill the running process**: `kill <pid>`
+4. **Wait for auto-restart** (service should restart automatically)
+5. **Send post-restart message**:
+   ```
+   Wieder da! ✅
+   Build <new-hash> ist aktiv
+   ```
+
+The build hash is stored in `/workspace/project/data/build-hash.txt` and calculated from the main compiled output file.
