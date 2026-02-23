@@ -130,6 +130,18 @@ function buildVolumeMounts(
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
+      // Remove stale symlinks or directories that may have been created by previous container runs
+      // (containers sometimes symlink skills to /workspace/project paths which don't exist on host)
+      try {
+        const stat = fs.lstatSync(dstDir);
+        if (stat.isSymbolicLink()) {
+          fs.unlinkSync(dstDir);
+        } else if (stat.isDirectory()) {
+          fs.rmSync(dstDir, { recursive: true });
+        }
+      } catch {
+        // Path doesn't exist, that's fine
+      }
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
