@@ -154,18 +154,32 @@ server.tool(
   "List all scheduled tasks. From main: shows all tasks. From other groups: shows only that group's tasks.",
   {},
   async () => {
-    const tasksFile = path.join(IPC_DIR, 'current_tasks.json');
+    // Request fresh task list from host via IPC
+    const requestFile = path.join(TASKS_DIR, `list_request_${Date.now()}.json`);
+    const responseFile = path.join(IPC_DIR, `task_list_${groupFolder}_${Date.now()}.json`);
 
     try {
-      if (!fs.existsSync(tasksFile)) {
-        return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };
+      fs.writeFileSync(requestFile, JSON.stringify({
+        type: 'list_tasks',
+        groupFolder,
+        isMain,
+        responseFile,
+        timestamp: new Date().toISOString(),
+      }));
+
+      // Wait for response file (with timeout)
+      const maxWait = 5000; // 5 seconds
+      const startTime = Date.now();
+
+      while (!fs.existsSync(responseFile)) {
+        if (Date.now() - startTime > maxWait) {
+          return { content: [{ type: 'text' as const, text: 'Timeout waiting for task list.' }] };
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
 
-      const allTasks = JSON.parse(fs.readFileSync(tasksFile, 'utf-8'));
-
-      const tasks = isMain
-        ? allTasks
-        : allTasks.filter((t: { groupFolder: string }) => t.groupFolder === groupFolder);
+      const tasks = JSON.parse(fs.readFileSync(responseFile, 'utf-8'));
+      fs.unlinkSync(responseFile); // Cleanup
 
       if (tasks.length === 0) {
         return { content: [{ type: 'text' as const, text: 'No scheduled tasks found.' }] };

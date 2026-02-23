@@ -9,6 +9,7 @@ import {
   MAIN_GROUP_FOLDER,
   TIMEZONE,
 } from './config.js';
+import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
@@ -79,9 +80,13 @@ export function startIpcWatcher(deps: IpcDeps): void {
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  if (data.sender && data.chatJid.startsWith('tg:')) {
+                    await sendPoolMessage(data.chatJid, data.text, data.sender, sourceGroup);
+                  } else {
+                    await deps.sendMessage(data.chatJid, data.text);
+                  }
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup },
+                    { chatJid: data.chatJid, sourceGroup, sender: data.sender },
                     'IPC message sent',
                   );
                 } else {
@@ -163,6 +168,7 @@ export async function processTaskIpc(
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
+    responseFile?: string;
     // For register_group
     jid?: string;
     name?: string;
@@ -178,6 +184,38 @@ export async function processTaskIpc(
   const registeredGroups = deps.registeredGroups();
 
   switch (data.type) {
+    case 'list_tasks':
+      if (data.responseFile) {
+        const { getAllTasks } = await import('./db.js');
+        const allTasks = getAllTasks();
+
+        // Filter tasks based on permissions
+        const tasks = isMain
+          ? allTasks
+          : allTasks.filter(t => t.group_folder === sourceGroup);
+
+        // Translate container path (/workspace/ipc/...) to host path (DATA_DIR/ipc/{sourceGroup}/...)
+        const containerIpcPrefix = '/workspace/ipc/';
+        const hostIpcDir = path.join(DATA_DIR, 'ipc', sourceGroup) + '/';
+        const hostResponseFile = data.responseFile.startsWith(containerIpcPrefix)
+          ? hostIpcDir + data.responseFile.slice(containerIpcPrefix.length)
+          : data.responseFile;
+
+        // Write response
+        fs.writeFileSync(hostResponseFile, JSON.stringify(tasks.map(t => ({
+          id: t.id,
+          groupFolder: t.group_folder,
+          prompt: t.prompt,
+          schedule_type: t.schedule_type,
+          schedule_value: t.schedule_value,
+          status: t.status,
+          next_run: t.next_run,
+        }))));
+
+        logger.info({ sourceGroup, count: tasks.length }, 'Task list requested via IPC');
+      }
+      break;
+
     case 'schedule_task':
       if (
         data.prompt &&
