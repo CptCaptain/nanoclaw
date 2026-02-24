@@ -1,4 +1,3 @@
-import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -37,8 +36,6 @@ export class WhatsAppChannel implements Channel {
   private flushing = false;
   private groupSyncTimerStarted = false;
 
-  private reconnectAttempts = 0;
-  private readonly MAX_RECONNECT_ATTEMPTS = 3;
   private failed = false;
   private initialConnectResolve?: () => void;
   private initialConnectReject?: (err: Error) => void;
@@ -113,7 +110,6 @@ export class WhatsAppChannel implements Channel {
         this.connected = true;
         logger.info('Connected to WhatsApp');
 
-        this.reconnectAttempts = 0;
         if (this.initialConnectResolve) {
           this.initialConnectResolve();
           this.initialConnectResolve = undefined;
