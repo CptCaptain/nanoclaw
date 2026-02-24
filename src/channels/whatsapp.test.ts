@@ -283,8 +283,8 @@ describe('WhatsAppChannel', () => {
       connectPromise.catch(() => {}); // suppress unhandled rejection warning
       await new Promise((r) => setTimeout(r, 0)); // flush microtasks
 
-      // Trigger MAX+1 disconnects before initial open (simulates 405 loop)
-      for (let i = 0; i < 4; i++) {
+      // Trigger MAX disconnects before initial open (simulates 405 loop)
+      for (let i = 0; i < 3; i++) {
         triggerDisconnect(428); // connectionClosed — not loggedOut
         await new Promise((r) => setTimeout(r, 0));
       }

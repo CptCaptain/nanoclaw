@@ -93,7 +93,7 @@ export class WhatsAppChannel implements Channel {
 
         if (shouldReconnect && !this.failed) {
           this.reconnectAttempts++;
-          if (this.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
+          if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
             this.failed = true;
             if (this.initialConnectReject) {
               const err = new Error(
