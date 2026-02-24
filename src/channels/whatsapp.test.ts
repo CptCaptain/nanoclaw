@@ -262,7 +262,7 @@ describe('WhatsAppChannel', () => {
       mockExit.mockRestore();
     });
 
-    it('retries reconnection after 5s on failure', async () => {
+    it('reconnects after non-loggedOut disconnect', async () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
@@ -284,7 +284,7 @@ describe('WhatsAppChannel', () => {
       await new Promise((r) => setTimeout(r, 0)); // flush microtasks
 
       // Trigger MAX+1 disconnects before initial open (simulates 405 loop)
-      for (let i = 0; i <= 3; i++) {
+      for (let i = 0; i < 4; i++) {
         triggerDisconnect(428); // connectionClosed — not loggedOut
         await new Promise((r) => setTimeout(r, 0));
       }
@@ -298,14 +298,21 @@ describe('WhatsAppChannel', () => {
 
       await connectChannel(channel);
 
-      // Simulate some disconnects and reconnects
+      // Disconnect and reconnect — this should reset the attempt counter
       triggerDisconnect(428);
       await new Promise((r) => setTimeout(r, 0));
       triggerConnection('open');
       await new Promise((r) => setTimeout(r, 0));
 
-      // Channel should still be functional (counter was reset)
       expect(channel.isConnected()).toBe(true);
+
+      // Now trigger 1 more disconnect — if the counter was reset, the cap
+      // should not fire (reconnectAttempts will be below MAX_RECONNECT_ATTEMPTS)
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Channel should not be marked as permanently failed — it can still reconnect
+      expect((channel as any).failed).toBe(false);
     });
   });
 

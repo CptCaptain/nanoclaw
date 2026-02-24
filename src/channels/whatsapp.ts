@@ -95,10 +95,10 @@ export class WhatsAppChannel implements Channel {
           this.reconnectAttempts++;
           if (this.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
             this.failed = true;
-            const err = new Error(
-              `WhatsApp: too many connection failures (reason: ${reason})`,
-            );
             if (this.initialConnectReject) {
+              const err = new Error(
+                `WhatsApp: too many connection failures (reason: ${reason})`,
+              );
               this.initialConnectReject(err);
               this.initialConnectResolve = undefined;
               this.initialConnectReject = undefined;
