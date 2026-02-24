@@ -24,6 +24,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  deleteSession,
   getAllTasks,
   getMessagesSince,
   getNewMessages,
@@ -50,6 +51,8 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let groupModels: Record<string, string> = {};
+const runtimeBootstrapPending: Record<string, { from: 'claude' | 'codex'; to: 'claude' | 'codex' }> = {};
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
@@ -65,6 +68,15 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+
+  const modelState = getRouterState('group_models');
+  try {
+    groupModels = modelState ? JSON.parse(modelState) : {};
+  } catch {
+    logger.warn('Corrupted group_models in DB, resetting');
+    groupModels = {};
+  }
+
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
@@ -79,6 +91,7 @@ function saveState(): void {
     'last_agent_timestamp',
     JSON.stringify(lastAgentTimestamp),
   );
+  setRouterState('group_models', JSON.stringify(groupModels));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -128,6 +141,246 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
   registeredGroups = groups;
 }
 
+type AgentRuntime = 'claude' | 'codex';
+
+type ParsedModelCommand =
+  | { action: 'show' | 'list' | 'reset' }
+  | { action: 'set'; model: string }
+  | { action: 'invalid'; error: string };
+
+function parseModelCommand(content: string): ParsedModelCommand | null {
+  let text = content.trim();
+  if (TRIGGER_PATTERN.test(text)) {
+    text = text.replace(TRIGGER_PATTERN, '').trim();
+  }
+
+  if (!text.toLowerCase().startsWith('/model')) return null;
+
+  const args = text.slice('/model'.length).trim();
+  if (!args) return { action: 'show' };
+
+  const lowerArgs = args.toLowerCase();
+  if (lowerArgs === 'list') return { action: 'list' };
+  if (['default', 'reset', 'auto', 'clear'].includes(lowerArgs)) {
+    return { action: 'reset' };
+  }
+
+  if (!/^[a-zA-Z0-9._:-]{2,100}$/.test(args)) {
+    return {
+      action: 'invalid',
+      error:
+        'Invalid model name. Use letters/numbers plus . _ : - (example: /model sonnet).',
+    };
+  }
+
+  return { action: 'set', model: args };
+}
+
+function resolveRuntimeAndModel(modelSetting?: string): {
+  runtime: AgentRuntime;
+  model?: string;
+} {
+  if (!modelSetting) {
+    return { runtime: 'claude' };
+  }
+
+  const raw = modelSetting.trim();
+  if (!raw) {
+    return { runtime: 'claude' };
+  }
+
+  let runtime: AgentRuntime;
+  let model = raw;
+
+  const colonIdx = raw.indexOf(':');
+  if (colonIdx > 0) {
+    const prefix = raw.slice(0, colonIdx).toLowerCase();
+    if (prefix === 'codex' || prefix === 'openai') {
+      runtime = 'codex';
+      model = raw.slice(colonIdx + 1).trim();
+      return model ? { runtime, model } : { runtime };
+    }
+    if (prefix === 'claude') {
+      runtime = 'claude';
+      model = raw.slice(colonIdx + 1).trim();
+      return model ? { runtime, model } : { runtime };
+    }
+  }
+
+  const lower = raw.toLowerCase();
+  if (lower === 'codex' || lower === 'openai') {
+    return { runtime: 'codex' };
+  }
+  if (lower === 'claude') {
+    return { runtime: 'claude' };
+  }
+
+  runtime = /^(gpt-|o[1-9]|codex)/.test(lower) ? 'codex' : 'claude';
+  return { runtime, model: raw };
+}
+
+function currentModelLabel(groupFolder: string): string {
+  const modelSetting = groupModels[groupFolder];
+  if (!modelSetting) return 'default (claude runtime)';
+  const { runtime, model } = resolveRuntimeAndModel(modelSetting);
+  return model ? `${model} (${runtime})` : `default (${runtime})`;
+}
+
+function getRuntimeForGroup(groupFolder: string): AgentRuntime {
+  return resolveRuntimeAndModel(groupModels[groupFolder]).runtime;
+}
+
+function getModelForGroup(groupFolder: string): string | undefined {
+  return resolveRuntimeAndModel(groupModels[groupFolder]).model;
+}
+
+function sessionKey(groupFolder: string, runtime: AgentRuntime): string {
+  return `${groupFolder}::${runtime}`;
+}
+
+function getSessionId(groupFolder: string, runtime: AgentRuntime): string | undefined {
+  // Backwards compatibility: old installs stored only one session per group.
+  if (runtime === 'claude') {
+    return sessions[sessionKey(groupFolder, runtime)] || sessions[groupFolder];
+  }
+  return sessions[sessionKey(groupFolder, runtime)];
+}
+
+function setSessionId(groupFolder: string, runtime: AgentRuntime, sessionId: string): void {
+  const key = sessionKey(groupFolder, runtime);
+  sessions[key] = sessionId;
+  setSession(key, sessionId);
+
+  // Migrate legacy key for Claude so older tooling keeps seeing the active session.
+  if (runtime === 'claude') {
+    sessions[groupFolder] = sessionId;
+    setSession(groupFolder, sessionId);
+  }
+}
+
+function clearRuntimeSession(groupFolder: string, runtime: AgentRuntime): void {
+  const key = sessionKey(groupFolder, runtime);
+  delete sessions[key];
+  deleteSession(key);
+
+  if (runtime === 'claude') {
+    delete sessions[groupFolder];
+    deleteSession(groupFolder);
+  }
+}
+
+async function sendControlMessage(
+  channel: Channel,
+  chatJid: string,
+  text: string,
+): Promise<void> {
+  try {
+    await channel.sendMessage(chatJid, text);
+  } catch (err) {
+    logger.warn({ chatJid, err }, 'Failed to send control message');
+  }
+}
+
+async function applyModelCommands(
+  messages: NewMessage[],
+  group: RegisteredGroup,
+  chatJid: string,
+  channel: Channel,
+): Promise<NewMessage[]> {
+  const userMessages: NewMessage[] = [];
+
+  for (const msg of messages) {
+    const command = parseModelCommand(msg.content);
+    if (!command) {
+      userMessages.push(msg);
+      continue;
+    }
+
+    if (command.action === 'show') {
+      await sendControlMessage(
+        channel,
+        chatJid,
+        `Model for this chat: ${currentModelLabel(group.folder)}\nUse /model <name> to switch (e.g. opus or gpt-5), /model default to reset.`,
+      );
+      continue;
+    }
+
+    if (command.action === 'list') {
+      await sendControlMessage(
+        channel,
+        chatJid,
+        'Examples: sonnet, opus, haiku (Claude) or gpt-5/o3 (Codex). You can force runtime with prefixes like codex:gpt-5 or claude:opus, or use /model codex for Codex defaults.',
+      );
+      continue;
+    }
+
+    if (command.action === 'reset') {
+      const previousRuntime = getRuntimeForGroup(group.folder);
+      delete groupModels[group.folder];
+      const nextRuntime = getRuntimeForGroup(group.folder);
+
+      if (previousRuntime !== nextRuntime) {
+        runtimeBootstrapPending[chatJid] = {
+          from: previousRuntime,
+          to: nextRuntime,
+        };
+        clearRuntimeSession(group.folder, nextRuntime);
+        // Close active container so next message starts under the new runtime.
+        queue.closeStdin(chatJid);
+      }
+
+      saveState();
+      await sendControlMessage(
+        channel,
+        chatJid,
+        previousRuntime !== nextRuntime
+          ? 'Model reset to default for this chat. Runtime switched; I will hand over recent context on the next message.'
+          : 'Model reset to default for this chat.',
+      );
+      continue;
+    }
+
+    if (command.action === 'invalid') {
+      await sendControlMessage(channel, chatJid, command.error);
+      continue;
+    }
+
+    if (command.action === 'set') {
+      const previousRuntime = getRuntimeForGroup(group.folder);
+      groupModels[group.folder] = command.model;
+      const resolved = resolveRuntimeAndModel(command.model);
+
+      if (previousRuntime !== resolved.runtime) {
+        runtimeBootstrapPending[chatJid] = {
+          from: previousRuntime,
+          to: resolved.runtime,
+        };
+        clearRuntimeSession(group.folder, resolved.runtime);
+        // Close active container so next message starts under the new runtime.
+        queue.closeStdin(chatJid);
+      }
+
+      saveState();
+      const label = resolved.model
+        ? `${resolved.model} (${resolved.runtime})`
+        : `default (${resolved.runtime})`;
+      await sendControlMessage(
+        channel,
+        chatJid,
+        previousRuntime !== resolved.runtime
+          ? `Model/runtime set to ${label} for this chat. Runtime switched; I will hand over recent context on the next message.`
+          : `Model set to ${label} for this chat.`,
+      );
+    }
+  }
+
+  return userMessages;
+}
+
+function stripModelCommands(messages: NewMessage[]): NewMessage[] {
+  return messages.filter((m) => !parseModelCommand(m.content));
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -154,8 +407,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
-
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -163,8 +414,47 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages[missedMessages.length - 1].timestamp;
   saveState();
 
+  const userMessages = await applyModelCommands(
+    missedMessages,
+    group,
+    chatJid,
+    channel,
+  );
+
+  if (userMessages.length === 0) {
+    logger.info(
+      { group: group.name, messageCount: missedMessages.length },
+      'Processed control command(s) with no agent invocation',
+    );
+    return true;
+  }
+
+  let promptMessages = userMessages;
+  const bootstrap = runtimeBootstrapPending[chatJid];
+  if (bootstrap) {
+    const fullHistory = stripModelCommands(
+      getMessagesSince(chatJid, '', ASSISTANT_NAME),
+    );
+    const recentHistory = fullHistory.slice(-80);
+    if (recentHistory.length > 0) {
+      promptMessages = recentHistory;
+    }
+    delete runtimeBootstrapPending[chatJid];
+    logger.info(
+      {
+        group: group.name,
+        fromRuntime: bootstrap.from,
+        toRuntime: bootstrap.to,
+        historyMessages: promptMessages.length,
+      },
+      'Bootstrapping runtime switch with recent history',
+    );
+  }
+
+  const prompt = formatMessages(promptMessages);
+
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: promptMessages.length },
     'Processing messages',
   );
 
@@ -234,7 +524,9 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const runtime = getRuntimeForGroup(group.folder);
+  const sessionId = getSessionId(group.folder, runtime);
+  const model = getModelForGroup(group.folder);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -265,8 +557,7 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          setSessionId(group.folder, runtime, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -278,6 +569,8 @@ async function runAgent(
       {
         prompt,
         sessionId,
+        runtime,
+        model,
         groupFolder: group.folder,
         chatJid,
         isMain,
@@ -288,8 +581,7 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      setSessionId(group.folder, runtime, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -368,20 +660,45 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
+          // If a container is already active, handle model commands here and
+          // pipe only non-command messages into the running session.
+          if (queue.hasActiveContainer(chatJid)) {
+            const userMessages = await applyModelCommands(
+              messagesToSend,
+              group,
+              chatJid,
+              channel,
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+
+            if (userMessages.length === 0) {
+              lastAgentTimestamp[chatJid] =
+                messagesToSend[messagesToSend.length - 1].timestamp;
+              saveState();
+              logger.debug(
+                { chatJid, count: messagesToSend.length },
+                'Processed control command(s) for active container',
+              );
+              continue;
+            }
+
+            const formatted = formatMessages(userMessages);
+            if (queue.sendMessage(chatJid, formatted)) {
+              lastAgentTimestamp[chatJid] =
+                messagesToSend[messagesToSend.length - 1].timestamp;
+              saveState();
+              logger.debug(
+                { chatJid, count: userMessages.length },
+                'Piped messages to active container',
+              );
+              // Show typing indicator while the container processes the piped message
+              channel.setTyping?.(chatJid, true)?.catch((err) =>
+                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+              );
+            } else {
+              // Race: container died after hasActiveContainer check
+              queue.enqueueMessageCheck(chatJid);
+            }
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -501,6 +818,8 @@ async function main(): Promise<void> {
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    getModelForGroup,
+    getRuntimeForGroup,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {

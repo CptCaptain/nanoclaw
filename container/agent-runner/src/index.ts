@@ -14,6 +14,7 @@
  *   Final marker after loop ends signals completion.
  */
 
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
@@ -22,6 +23,8 @@ import { fileURLToPath } from 'url';
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  model?: string;
+  runtime?: 'claude' | 'codex';
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -188,7 +191,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // Secrets to strip from Bash tool subprocess environments.
 // These are needed by claude-code for API auth but should never
 // be visible to commands Kit runs.
-const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
+const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'OPENAI_API_KEY'];
 
 function createSanitizeBashHook(): HookCallback {
   return async (input, _toolUseId, _context) => {
@@ -354,7 +357,7 @@ function waitForIpcMessage(): Promise<string | null> {
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
-async function runQuery(
+async function runClaudeQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
@@ -418,6 +421,7 @@ async function runQuery(
     prompt: stream,
     options: {
       cwd: '/workspace/group',
+      model: containerInput.model,
       additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
@@ -490,6 +494,186 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+const CODEX_CONTEXT_FILE_LIMIT = 12_000;
+const CODEX_CONTEXT_TOTAL_LIMIT = 60_000;
+
+function collectCodexContextFiles(): Array<{ filePath: string; content: string }> {
+  const collected: Array<{ filePath: string; content: string }> = [];
+  let total = 0;
+
+  const candidates: string[] = [];
+
+  const prioritized = [
+    '/workspace/global/CLAUDE.md',
+    '/workspace/group/CLAUDE.md',
+    '/workspace/group/soul.md',
+    '/workspace/group/persona.md',
+    '/workspace/group/character.md',
+    '/workspace/group/style.md',
+  ];
+
+  for (const filePath of prioritized) {
+    if (fs.existsSync(filePath)) candidates.push(filePath);
+  }
+
+  // Include additional top-level markdown files from the group directory.
+  try {
+    const groupEntries = fs.readdirSync('/workspace/group');
+    for (const entry of groupEntries) {
+      if (!entry.toLowerCase().endsWith('.md')) continue;
+      const full = path.join('/workspace/group', entry);
+      if (candidates.includes(full)) continue;
+      candidates.push(full);
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const filePath of candidates) {
+    if (total >= CODEX_CONTEXT_TOTAL_LIMIT) break;
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      if (!raw.trim()) continue;
+      const truncated = raw.slice(0, CODEX_CONTEXT_FILE_LIMIT);
+      const remaining = CODEX_CONTEXT_TOTAL_LIMIT - total;
+      const content = truncated.slice(0, remaining);
+      if (!content) continue;
+      collected.push({ filePath, content });
+      total += content.length;
+    } catch {
+      // ignore unreadable files
+    }
+  }
+
+  return collected;
+}
+
+function buildCodexPrompt(prompt: string): string {
+  const contextFiles = collectCodexContextFiles();
+  if (contextFiles.length === 0) return prompt;
+
+  const blocks = contextFiles
+    .map((f) => `<context_file path="${f.filePath}">\n${f.content}\n</context_file>`)
+    .join('\n\n');
+
+  return [
+    'You are running in NanoClaw.',
+    'Treat the following context files as persistent persona/memory guidance unless the user explicitly overrides them.',
+    blocks,
+    '---',
+    prompt,
+  ].join('\n\n');
+}
+
+async function runCodexTurn(
+  prompt: string,
+  sessionId: string | undefined,
+  containerInput: ContainerInput,
+  codexEnv: Record<string, string | undefined>,
+): Promise<{ newSessionId?: string; closedDuringQuery: boolean }> {
+  const baseArgs = [
+    '--dangerously-bypass-approvals-and-sandbox',
+    '-C',
+    '/workspace/group',
+    'exec',
+  ];
+
+  const promptWithContext = buildCodexPrompt(prompt);
+
+  const commandArgs = sessionId
+    ? [
+        ...baseArgs,
+        'resume',
+        '--json',
+        '--skip-git-repo-check',
+        ...(containerInput.model ? ['--model', containerInput.model] : []),
+        sessionId,
+        promptWithContext,
+      ]
+    : [
+        ...baseArgs,
+        '--json',
+        '--skip-git-repo-check',
+        ...(containerInput.model ? ['--model', containerInput.model] : []),
+        promptWithContext,
+      ];
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('codex', commandArgs, {
+      cwd: '/workspace/group',
+      env: codexEnv as NodeJS.ProcessEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdoutBuffer = '';
+    let stderr = '';
+    let newSessionId = sessionId;
+
+    const handleLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      let event: any;
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+
+      if (event.type === 'thread.started' && event.thread_id) {
+        newSessionId = event.thread_id;
+      }
+
+      const item = event.item;
+      if (
+        event.type === 'item.completed' &&
+        item &&
+        item.type === 'agent_message' &&
+        typeof item.text === 'string'
+      ) {
+        writeOutput({
+          status: 'success',
+          result: item.text,
+          newSessionId,
+        });
+      }
+    };
+
+    proc.stdout.on('data', (chunk) => {
+      stdoutBuffer += chunk.toString();
+      let newlineIdx = stdoutBuffer.indexOf('\n');
+      while (newlineIdx !== -1) {
+        const line = stdoutBuffer.slice(0, newlineIdx);
+        stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
+        handleLine(line);
+        newlineIdx = stdoutBuffer.indexOf('\n');
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    proc.on('close', (code) => {
+      if (stdoutBuffer.trim()) {
+        handleLine(stdoutBuffer);
+      }
+
+      if (code !== 0) {
+        reject(new Error(`Codex exited with code ${code}: ${stderr.slice(-400)}`));
+        return;
+      }
+
+      resolve({
+        newSessionId,
+        closedDuringQuery: false,
+      });
+    });
+
+    proc.on('error', (err) => reject(err));
+  });
+}
+
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -508,12 +692,18 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Build SDK env: merge secrets into process.env for the SDK only.
-  // Secrets never touch process.env itself, so Bash subprocesses can't see them.
-  const sdkEnv: Record<string, string | undefined> = { ...process.env };
+  // Build runner env: merge secrets into process.env for model runtimes only.
+  // Secrets never touch process.env itself, so host logs/processes can't see them.
+  const runnerEnv: Record<string, string | undefined> = { ...process.env };
   for (const [key, value] of Object.entries(containerInput.secrets || {})) {
-    sdkEnv[key] = value;
+    runnerEnv[key] = value;
   }
+
+  // MCP server context (used by Claude SDK directly, and by Codex MCP server
+  // via inherited environment when configured in ~/.codex/config.toml).
+  runnerEnv.NANOCLAW_CHAT_JID = containerInput.chatJid;
+  runnerEnv.NANOCLAW_GROUP_FOLDER = containerInput.groupFolder;
+  runnerEnv.NANOCLAW_IS_MAIN = containerInput.isMain ? '1' : '0';
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
@@ -535,17 +725,25 @@ async function main(): Promise<void> {
     prompt += '\n' + pending.join('\n');
   }
 
+  const runtime = containerInput.runtime || 'claude';
+
   // Query loop: run query → wait for IPC message → run new query → repeat
   let resumeAt: string | undefined;
   try {
     while (true) {
-      log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
+      log(`Starting query (runtime: ${runtime}, session: ${sessionId || 'new'}, model: ${containerInput.model || 'default'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = runtime === 'codex'
+        ? await runCodexTurn(prompt, sessionId, containerInput, runnerEnv)
+        : await runClaudeQuery(prompt, sessionId, mcpServerPath, containerInput, runnerEnv, resumeAt);
+
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
-      if (queryResult.lastAssistantUuid) {
+      if (
+        'lastAssistantUuid' in queryResult &&
+        typeof queryResult.lastAssistantUuid === 'string'
+      ) {
         resumeAt = queryResult.lastAssistantUuid;
       }
 
