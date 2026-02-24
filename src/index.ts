@@ -418,6 +418,26 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
+async function sendStartupGreeting(channelErrors: string[]): Promise<void> {
+  const mainEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+  );
+  if (!mainEntry) return; // fresh install, no main group registered yet
+
+  const [mainJid] = mainEntry;
+  const channel = findChannel(channels, mainJid);
+  if (!channel) return;
+
+  const msg =
+    channelErrors.length > 0
+      ? `Started. ⚠️ ${channelErrors.join('; ')}.`
+      : 'Started.';
+
+  await channel.sendMessage(mainJid, msg).catch((err) =>
+    logger.warn({ err }, 'Failed to send startup greeting'),
+  );
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
@@ -504,6 +524,7 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+  await sendStartupGreeting(channelErrors);
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);
