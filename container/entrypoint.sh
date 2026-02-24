@@ -40,19 +40,19 @@ while true; do
   echo "[$(date -Iseconds)] Starting node process..."
 
   launch_stderr=$(mktemp)
-  if node /tmp/dist/index.js < /tmp/input.json 2>"$launch_stderr"; then
+  if node /tmp/dist/index.js 2>"$launch_stderr" < /tmp/input.json; then
     EXIT_CODE=0
   else
     EXIT_CODE=$?
   fi
 
-  if [ "$EXIT_CODE" -ne 0 ]; then
-    if [ ! -f /tmp/input.json ]; then
-      echo "[$(date -Iseconds)] Input file disappeared during launch, treating turn as complete"
-      rm -f "$launch_stderr"
-      exit 0
-    fi
+  if [ "$EXIT_CODE" -ne 0 ] && [ ! -f /tmp/input.json ]; then
+    echo "[$(date -Iseconds)] Input file disappeared during launch, treating turn as complete"
+    rm -f "$launch_stderr"
+    exit 0
+  fi
 
+  if [ -s "$launch_stderr" ]; then
     cat "$launch_stderr" >&2
   fi
 
