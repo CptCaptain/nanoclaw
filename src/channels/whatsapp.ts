@@ -39,6 +39,8 @@ export class WhatsAppChannel implements Channel {
   private failed = false;
   private initialConnectResolve?: () => void;
   private initialConnectReject?: (err: Error) => void;
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_ATTEMPTS = 3;
 
   private opts: WhatsAppChannelOpts;
 
@@ -89,17 +91,27 @@ export class WhatsAppChannel implements Channel {
         const shouldReconnect = reason !== DisconnectReason.loggedOut;
         logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length }, 'Connection closed');
 
-        if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
-        } else {
+        if (shouldReconnect && !this.failed) {
+          this.reconnectAttempts++;
+          if (this.reconnectAttempts > this.MAX_RECONNECT_ATTEMPTS) {
+            this.failed = true;
+            const err = new Error(
+              `WhatsApp: too many connection failures (reason: ${reason})`,
+            );
+            if (this.initialConnectReject) {
+              this.initialConnectReject(err);
+              this.initialConnectResolve = undefined;
+              this.initialConnectReject = undefined;
+            } else {
+              logger.error({ reason }, 'WhatsApp: too many reconnect failures, giving up');
+            }
+            return;
+          }
+          logger.info({ attempt: this.reconnectAttempts }, 'Reconnecting...');
+          this.connectInternal().catch((err) =>
+            logger.error({ err }, 'Reconnection failed'),
+          );
+        } else if (!shouldReconnect) {
           logger.info('WhatsApp: logged out. Run /setup to re-authenticate.');
           this.failed = true;
           this.initialConnectReject?.(new Error('logged out — run /setup to re-authenticate'));
@@ -108,6 +120,7 @@ export class WhatsAppChannel implements Channel {
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectAttempts = 0;
         logger.info('Connected to WhatsApp');
 
         if (this.initialConnectResolve) {

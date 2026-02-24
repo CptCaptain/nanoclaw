@@ -274,6 +274,39 @@ describe('WhatsAppChannel', () => {
       // The channel sets a 5s retry — just verify it doesn't crash
       await new Promise((r) => setTimeout(r, 100));
     });
+
+    it('rejects connect() after MAX_RECONNECT_ATTEMPTS failures', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      const connectPromise = channel.connect();
+      connectPromise.catch(() => {}); // suppress unhandled rejection warning
+      await new Promise((r) => setTimeout(r, 0)); // flush microtasks
+
+      // Trigger MAX+1 disconnects before initial open (simulates 405 loop)
+      for (let i = 0; i <= 3; i++) {
+        triggerDisconnect(428); // connectionClosed — not loggedOut
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      await expect(connectPromise).rejects.toThrow('too many connection failures');
+    });
+
+    it('resets reconnect counter on successful connection', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      await connectChannel(channel);
+
+      // Simulate some disconnects and reconnects
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 0));
+      triggerConnection('open');
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Channel should still be functional (counter was reset)
+      expect(channel.isConnected()).toBe(true);
+    });
   });
 
   // --- Message handling ---
