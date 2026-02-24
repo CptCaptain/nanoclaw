@@ -161,6 +161,9 @@ function parseModelCommand(content: string): ParsedModelCommand | null {
 
   const lowerArgs = args.toLowerCase();
   if (lowerArgs === 'list') return { action: 'list' };
+  if (['status', 'current', 'active'].includes(lowerArgs)) {
+    return { action: 'show' };
+  }
   if (['default', 'reset', 'auto', 'clear'].includes(lowerArgs)) {
     return { action: 'reset' };
   }
@@ -297,10 +300,27 @@ async function applyModelCommands(
     }
 
     if (command.action === 'show') {
+      const runtime = getRuntimeForGroup(group.folder);
+      const model = getModelForGroup(group.folder) || 'default';
+      const activeSession = getSessionId(group.folder, runtime);
+      const claudeSession = getSessionId(group.folder, 'claude');
+      const codexSession = getSessionId(group.folder, 'codex');
+      const switchPending = runtimeBootstrapPending[chatJid];
+
       await sendControlMessage(
         channel,
         chatJid,
-        `Model for this chat: ${currentModelLabel(group.folder)}\nUse /model <name> to switch (e.g. opus or gpt-5), /model default to reset.`,
+        [
+          `Active runtime: ${runtime}`,
+          `Configured model: ${model}`,
+          `Current label: ${currentModelLabel(group.folder)}`,
+          `Active session: ${activeSession || 'none'}`,
+          `Sessions (claude/codex): ${claudeSession || 'none'} / ${codexSession || 'none'}`,
+          switchPending
+            ? `Pending runtime handoff: ${switchPending.from} -> ${switchPending.to}`
+            : 'Pending runtime handoff: none',
+          'Use /model <name> to switch (e.g. opus, gpt-5, codex:gpt-5).',
+        ].join('\n'),
       );
       continue;
     }
@@ -381,6 +401,148 @@ function stripModelCommands(messages: NewMessage[]): NewMessage[] {
   return messages.filter((m) => !parseModelCommand(m.content));
 }
 
+const PERSISTENT_FILE_LIMIT = 12_000;
+const PERSISTENT_TOTAL_LIMIT = 64_000;
+const HANDOFF_COMPACT_LIMIT = 70_000;
+
+function escapePromptXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function readFileSnippet(filePath: string, maxChars: number): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!content) return null;
+    return content.slice(0, maxChars);
+  } catch {
+    return null;
+  }
+}
+
+function buildPersistentContextBlock(group: RegisteredGroup): string | null {
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const projectRoot = process.cwd();
+  const candidates = [
+    path.join(projectRoot, 'AGENTS.md'),
+    path.join(projectRoot, 'SOUL.md'),
+    path.join(projectRoot, 'soul.md'),
+    path.join(projectRoot, 'groups', 'global', 'CLAUDE.md'),
+    path.join(groupDir, 'AGENTS.md'),
+    path.join(groupDir, 'SOUL.md'),
+    path.join(groupDir, 'soul.md'),
+    path.join(groupDir, 'CLAUDE.md'),
+  ];
+
+  // Include additional persona-like markdown files from group root.
+  try {
+    for (const entry of fs.readdirSync(groupDir)) {
+      if (!entry.toLowerCase().endsWith('.md')) continue;
+      if (!/(soul|agent|persona|character|style|identity)/i.test(entry)) continue;
+      candidates.push(path.join(groupDir, entry));
+    }
+  } catch {
+    // ignore
+  }
+
+  const seen = new Set<string>();
+  const blocks: string[] = [];
+  let total = 0;
+
+  for (const filePath of candidates) {
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+
+    const remaining = PERSISTENT_TOTAL_LIMIT - total;
+    if (remaining <= 0) break;
+
+    const snippet = readFileSnippet(
+      filePath,
+      Math.min(PERSISTENT_FILE_LIMIT, remaining),
+    );
+    if (!snippet) continue;
+
+    const escapedPath = escapePromptXml(filePath);
+    const escapedContent = escapePromptXml(snippet);
+    const block = `<context_file path="${escapedPath}">\n${escapedContent}\n</context_file>`;
+    blocks.push(block);
+    total += snippet.length;
+  }
+
+  if (blocks.length === 0) return null;
+
+  return [
+    '<persistent_context>',
+    'The following files define long-lived assistant behavior/persona/memory. Keep them active unless the user explicitly overrides them.',
+    blocks.join('\n\n'),
+    '</persistent_context>',
+  ].join('\n');
+}
+
+function buildRuntimeSwitchHandoff(
+  chatJid: string,
+  bootstrap: { from: AgentRuntime; to: AgentRuntime },
+): { recentMessages: NewMessage[]; handoffBlock: string | null } {
+  const fullHistory = stripModelCommands(
+    getMessagesSince(chatJid, '', ASSISTANT_NAME),
+  );
+
+  if (fullHistory.length === 0) {
+    return { recentMessages: [], handoffBlock: null };
+  }
+
+  const window = fullHistory.slice(-600);
+  const recentMessages = window.slice(-140);
+  const older = window.slice(0, Math.max(0, window.length - recentMessages.length));
+
+  const compactLines: string[] = [];
+  let used = 0;
+  for (let i = older.length - 1; i >= 0; i--) {
+    const m = older[i];
+    const compact = `${m.timestamp} | ${m.sender_name}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 220)}`;
+    if (!compact.trim()) continue;
+    if (used + compact.length > HANDOFF_COMPACT_LIMIT) break;
+    compactLines.push(compact);
+    used += compact.length;
+  }
+  compactLines.reverse();
+
+  const handoffBlock = [
+    `<runtime_handoff from="${bootstrap.from}" to="${bootstrap.to}">`,
+    'The provider/runtime switched. Continue the same conversation seamlessly.',
+    'Recent turns are included below in full message form. Older turns are compacted here:',
+    ...compactLines.map((line) => `- ${escapePromptXml(line)}`),
+    '</runtime_handoff>',
+  ].join('\n');
+
+  return {
+    recentMessages: recentMessages.length > 0 ? recentMessages : window,
+    handoffBlock,
+  };
+}
+
+function buildPromptWithContext(
+  group: RegisteredGroup,
+  messages: NewMessage[],
+  extraBlocks: string[] = [],
+): string {
+  const sections: string[] = [];
+
+  for (const block of extraBlocks) {
+    if (block && block.trim()) sections.push(block.trim());
+  }
+
+  const persistent = buildPersistentContextBlock(group);
+  if (persistent) sections.push(persistent);
+
+  sections.push(formatMessages(messages));
+  return sections.join('\n\n');
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -430,14 +592,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   let promptMessages = userMessages;
+  const extraPromptBlocks: string[] = [];
+
   const bootstrap = runtimeBootstrapPending[chatJid];
   if (bootstrap) {
-    const fullHistory = stripModelCommands(
-      getMessagesSince(chatJid, '', ASSISTANT_NAME),
-    );
-    const recentHistory = fullHistory.slice(-80);
-    if (recentHistory.length > 0) {
-      promptMessages = recentHistory;
+    const handoff = buildRuntimeSwitchHandoff(chatJid, bootstrap);
+    if (handoff.recentMessages.length > 0) {
+      promptMessages = handoff.recentMessages;
+    }
+    if (handoff.handoffBlock) {
+      extraPromptBlocks.push(handoff.handoffBlock);
     }
     delete runtimeBootstrapPending[chatJid];
     logger.info(
@@ -447,11 +611,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         toRuntime: bootstrap.to,
         historyMessages: promptMessages.length,
       },
-      'Bootstrapping runtime switch with recent history',
+      'Bootstrapping runtime switch with compacted history handoff',
     );
   }
 
-  const prompt = formatMessages(promptMessages);
+  const prompt = buildPromptWithContext(group, promptMessages, extraPromptBlocks);
 
   logger.info(
     { group: group.name, messageCount: promptMessages.length },
@@ -664,6 +828,13 @@ async function startMessageLoop(): Promise<void> {
           // If a container is already active, handle model commands here and
           // pipe only non-command messages into the running session.
           if (queue.hasActiveContainer(chatJid)) {
+            if (runtimeBootstrapPending[chatJid]) {
+              // Runtime just switched; avoid piping to the old active runtime.
+              queue.closeStdin(chatJid);
+              queue.enqueueMessageCheck(chatJid);
+              continue;
+            }
+
             const userMessages = await applyModelCommands(
               messagesToSend,
               group,
@@ -682,7 +853,7 @@ async function startMessageLoop(): Promise<void> {
               continue;
             }
 
-            const formatted = formatMessages(userMessages);
+            const formatted = buildPromptWithContext(group, userMessages);
             if (queue.sendMessage(chatJid, formatted)) {
               lastAgentTimestamp[chatJid] =
                 messagesToSend[messagesToSend.length - 1].timestamp;

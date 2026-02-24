@@ -504,9 +504,14 @@ function collectCodexContextFiles(): Array<{ filePath: string; content: string }
   const candidates: string[] = [];
 
   const prioritized = [
+    '/workspace/project/AGENTS.md',
+    '/workspace/project/SOUL.md',
+    '/workspace/project/soul.md',
     '/workspace/global/CLAUDE.md',
-    '/workspace/group/CLAUDE.md',
+    '/workspace/group/AGENTS.md',
+    '/workspace/group/SOUL.md',
     '/workspace/group/soul.md',
+    '/workspace/group/CLAUDE.md',
     '/workspace/group/persona.md',
     '/workspace/group/character.md',
     '/workspace/group/style.md',
@@ -549,6 +554,11 @@ function collectCodexContextFiles(): Array<{ filePath: string; content: string }
 }
 
 function buildCodexPrompt(prompt: string): string {
+  // If the host already injected persistent context, avoid duplicating it.
+  if (prompt.includes('<persistent_context>')) {
+    return prompt;
+  }
+
   const contextFiles = collectCodexContextFiles();
   if (contextFiles.length === 0) return prompt;
 

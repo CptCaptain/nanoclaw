@@ -75,6 +75,7 @@ You can also switch models per chat on the fly:
 @Klaus /model codex:gpt-5
 @Klaus /model default
 @Klaus /model
+@Klaus /model status
 ```
 
 From the main channel (your self-chat), you can manage groups and tasks:
