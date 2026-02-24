@@ -97,6 +97,15 @@ export async function run(_args: string[]): Promise<void> {
     }
   }
 
+  // Subscription auth fallback: use host CLI credentials when present.
+  if (credentials === 'missing') {
+    const hostClaudeCredentials = path.join(homeDir, '.claude', '.credentials.json');
+    const hostCodexCredentials = path.join(homeDir, '.codex', 'auth.json');
+    if (fs.existsSync(hostClaudeCredentials) || fs.existsSync(hostCodexCredentials)) {
+      credentials = 'configured';
+    }
+  }
+
   // 4. Check WhatsApp auth
   let whatsappAuth = 'not_found';
   const authDir = path.join(projectRoot, 'store', 'auth');

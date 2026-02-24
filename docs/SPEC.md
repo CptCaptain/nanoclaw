@@ -227,20 +227,24 @@ Additional mounts appear at `/workspace/extra/{containerPath}` inside the contai
 
 ### Claude Authentication
 
-Configure authentication in a `.env` file in the project root. Two options:
+Authentication can come from either `.env` or your host Claude login state.
 
-**Option 1: Claude Subscription (OAuth token)**
+**Option 1: Claude Subscription (OAuth token in `.env`)**
 ```bash
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
 ```
-The token can be extracted from `~/.claude/.credentials.json` if you're logged in to Claude Code.
 
-**Option 2: Pay-per-use API Key**
+**Option 2: Pay-per-use API Key (`.env`)**
 ```bash
 ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-Only the authentication variables (`CLAUDE_CODE_OAUTH_TOKEN` and `ANTHROPIC_API_KEY`) are extracted from `.env` and written to `data/env/env`, then mounted into the container at `/workspace/env-dir/env` and sourced by the entrypoint script. This ensures other environment variables in `.env` are not exposed to the agent. This workaround is needed because some container runtimes lose `-e` environment variables when using `-i` (interactive mode with piped stdin).
+**Option 3: Host CLI login state (no `.env` token required)**
+NanoClaw copies host auth artifacts into each group's isolated session dirs before launching containers:
+- Claude: `~/.claude/*` auth artifacts + `~/.claude.json`
+- Codex: `~/.codex/auth.json` + merged `config.toml`
+
+Only allowlisted auth variables are read from `.env` (`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). Other `.env` values are not forwarded to model runtime processes.
 
 ### Changing the Assistant Name
 

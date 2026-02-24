@@ -60,6 +60,10 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
     CREDENTIALS="configured"
   fi
 fi
+# Fallback: host subscription credentials (Claude/Codex)
+if [ "$CREDENTIALS" = "missing" ] && { [ -f "$HOME/.claude/.credentials.json" ] || [ -f "$HOME/.codex/auth.json" ]; }; then
+  CREDENTIALS="configured"
+fi
 log "Credentials: $CREDENTIALS"
 
 # 4. Check WhatsApp auth

@@ -68,6 +68,15 @@ Talk to your assistant with the trigger word (default: `@Klaus`):
 @Klaus every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
 ```
 
+You can also switch models per chat on the fly:
+```
+@Klaus /model opus
+@Klaus /model gpt-5
+@Klaus /model codex:gpt-5
+@Klaus /model default
+@Klaus /model
+```
+
 From the main channel (your self-chat), you can manage groups and tasks:
 ```
 @Klaus list all scheduled tasks across groups

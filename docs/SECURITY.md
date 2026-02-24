@@ -66,8 +66,11 @@ Messages and task operations are verified against group identity:
 
 ### 5. Credential Handling
 
-**Mounted Credentials:**
-- Claude auth tokens (filtered from `.env`, read-only)
+**Mounted / Synced Credentials:**
+- Auth env vars (allowlisted from `.env`)
+- Host Claude auth artifacts copied into per-group `.claude/`
+- Per-group copy of `~/.claude.json` mounted read-only at `/home/node/.claude.json`
+- Host Codex auth/config copied into per-group `.codex/`
 
 **NOT Mounted:**
 - WhatsApp session (`store/auth/`) - host only
@@ -77,10 +80,10 @@ Messages and task operations are verified against group identity:
 **Credential Filtering:**
 Only these environment variables are exposed to containers:
 ```typescript
-const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
+const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY'];
 ```
 
-> **Note:** Anthropic credentials are mounted so that Claude Code can authenticate when the agent runs. However, this means the agent itself can discover these credentials via Bash or file operations. Ideally, Claude Code would authenticate without exposing credentials to the agent's execution environment, but I couldn't figure this out. **PRs welcome** if you have ideas for credential isolation.
+> **Note:** Runtime auth artifacts (Claude/Codex and API env vars) are mounted so the agent runtime can authenticate in-container. This means the agent itself can discover these credentials via Bash or file operations. Ideally, auth would be delegated without exposing credentials to tool-executed subprocesses. **PRs welcome** if you have ideas for stronger credential isolation.
 
 ## Privilege Comparison
 
