@@ -442,20 +442,39 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
   };
 
-  // Create and connect channels
+  // Create and connect channels — failures are non-fatal as long as one channel works
+  const channelErrors: string[] = [];
+
   if (!TELEGRAM_ONLY) {
     whatsapp = new WhatsAppChannel(channelOpts);
-    channels.push(whatsapp);
-    await whatsapp.connect();
+    try {
+      await whatsapp.connect();
+      channels.push(whatsapp);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err }, 'WhatsApp failed to connect — continuing without it');
+      channelErrors.push(`WhatsApp: ${msg}`);
+    }
   }
 
   if (TELEGRAM_BOT_TOKEN) {
     const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
-    channels.push(telegram);
-    await telegram.connect();
-    if (TELEGRAM_BOT_POOL.length > 0) {
-      await initBotPool(TELEGRAM_BOT_POOL);
+    try {
+      await telegram.connect();
+      channels.push(telegram);
+      if (TELEGRAM_BOT_POOL.length > 0) {
+        await initBotPool(TELEGRAM_BOT_POOL);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err }, 'Telegram failed to connect — continuing without it');
+      channelErrors.push(`Telegram: ${msg}`);
     }
+  }
+
+  if (channels.length === 0) {
+    logger.fatal({ channelErrors }, 'All channels failed to connect — shutting down');
+    process.exit(1);
   }
 
   // Start subsystems (independently of connection handler)
