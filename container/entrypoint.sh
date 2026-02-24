@@ -14,6 +14,14 @@ RESTART_WINDOW_START=$(date +%s)
 
 # Auto-restart loop
 while true; do
+  # agent-runner deletes /tmp/input.json after parsing it (contains secrets).
+  # If it's gone, the turn is over and we should exit cleanly instead of trying
+  # to restart and failing with "No such file or directory".
+  if [ ! -f /tmp/input.json ]; then
+    echo "[$(date -Iseconds)] Input file consumed, exiting container cleanly"
+    exit 0
+  fi
+
   echo "[$(date -Iseconds)] Starting node process..."
   node /tmp/dist/index.js < /tmp/input.json
   EXIT_CODE=$?
