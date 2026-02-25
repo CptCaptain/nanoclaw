@@ -79,20 +79,38 @@ function readJsonObject(filePath: string): Record<string, unknown> | undefined {
   }
 }
 
-function copyFileIfSourceNewer(sourcePath: string, targetPath: string): boolean {
+export function copyFileIfSourceNewer(sourcePath: string, targetPath: string): boolean {
   if (!fs.existsSync(sourcePath)) return false;
 
   const sourceStat = fs.statSync(sourcePath);
   const targetExists = fs.existsSync(targetPath);
   if (targetExists) {
     const targetStat = fs.statSync(targetPath);
-    if (targetStat.mtimeMs >= sourceStat.mtimeMs) {
+
+    // Preserve newer per-group updates.
+    if (targetStat.mtimeMs > sourceStat.mtimeMs) {
       return false;
+    }
+
+    // Filesystems with coarse mtime precision can yield equal timestamps
+    // even when content changed; compare bytes in that case.
+    if (targetStat.mtimeMs === sourceStat.mtimeMs) {
+      const sameSize = targetStat.size === sourceStat.size;
+      if (sameSize) {
+        const sourceBytes = fs.readFileSync(sourcePath);
+        const targetBytes = fs.readFileSync(targetPath);
+        if (sourceBytes.equals(targetBytes)) {
+          return false;
+        }
+      }
     }
   }
 
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   fs.copyFileSync(sourcePath, targetPath);
+
+  // Keep timestamps aligned so future "source newer" checks are accurate.
+  fs.utimesSync(targetPath, sourceStat.atime, sourceStat.mtime);
   return true;
 }
 
