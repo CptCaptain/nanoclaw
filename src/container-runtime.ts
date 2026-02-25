@@ -19,6 +19,36 @@ export function stopContainer(name: string): string {
   return `${CONTAINER_RUNTIME_BIN} stop ${name}`;
 }
 
+/** Returns the shell command to pause a container by name. */
+export function pauseContainer(name: string): string {
+  return `${CONTAINER_RUNTIME_BIN} pause ${name}`;
+}
+
+/** Returns the shell command to unpause a container by name. */
+export function unpauseContainer(name: string): string {
+  return `${CONTAINER_RUNTIME_BIN} unpause ${name}`;
+}
+
+/** Try to pause a running container, returning false on failure. */
+export function tryPauseContainer(name: string): boolean {
+  try {
+    execSync(pauseContainer(name), { stdio: 'pipe', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Try to unpause a paused container, returning false on failure. */
+export function tryUnpauseContainer(name: string): boolean {
+  try {
+    execSync(unpauseContainer(name), { stdio: 'pipe', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Ensure the container runtime is running, starting it if needed. */
 export function ensureContainerRuntimeRunning(): void {
   try {

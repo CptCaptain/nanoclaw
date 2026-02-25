@@ -20,6 +20,10 @@ import {
   CONTAINER_RUNTIME_BIN,
   readonlyMountArgs,
   stopContainer,
+  pauseContainer,
+  unpauseContainer,
+  tryPauseContainer,
+  tryUnpauseContainer,
   ensureContainerRuntimeRunning,
   cleanupOrphans,
 } from './container-runtime.js';
@@ -43,6 +47,29 @@ describe('stopContainer', () => {
     expect(stopContainer('nanoclaw-test-123')).toBe(
       `${CONTAINER_RUNTIME_BIN} stop nanoclaw-test-123`,
     );
+  });
+});
+
+describe('pause/unpause helpers', () => {
+  it('builds pause/unpause commands', () => {
+    expect(pauseContainer('nanoclaw-x')).toBe(`${CONTAINER_RUNTIME_BIN} pause nanoclaw-x`);
+    expect(unpauseContainer('nanoclaw-x')).toBe(`${CONTAINER_RUNTIME_BIN} unpause nanoclaw-x`);
+  });
+
+  it('returns false when pause command fails', () => {
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error('fail');
+    });
+
+    expect(tryPauseContainer('nanoclaw-x')).toBe(false);
+  });
+
+  it('returns false when unpause command fails', () => {
+    mockExecSync.mockImplementationOnce(() => {
+      throw new Error('fail');
+    });
+
+    expect(tryUnpauseContainer('nanoclaw-x')).toBe(false);
   });
 });
 
