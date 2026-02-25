@@ -34,6 +34,7 @@ These methods implement the correct flow:
 
 2. **Run update/create via the client**
    - Work in `/workspace/group/mealie-integration`
+   - Load credentials first: `set -a && source .env && set +a`
    - Use `npx tsx` with `MealieClient`
 
 3. **Verify content actually persisted**
@@ -49,7 +50,7 @@ These methods implement the correct flow:
 ## Update Template
 
 ```bash
-cd /workspace/group/mealie-integration && npx tsx - <<'EOF'
+cd /workspace/group/mealie-integration && set -a && source .env && set +a && npx tsx - <<'EOF'
 import { MealieClient } from './client.ts';
 
 const client = new MealieClient({
