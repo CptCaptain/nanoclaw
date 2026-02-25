@@ -12,36 +12,53 @@ MAX_RESTARTS_PER_MINUTE=10
 RESTART_COUNT=0
 RESTART_WINDOW_START=$(date +%s)
 
+check_restart_budget() {
+  local current_time time_diff
+
+  current_time=$(date +%s)
+  time_diff=$((current_time - RESTART_WINDOW_START))
+
+  if [ "$time_diff" -lt 60 ]; then
+    RESTART_COUNT=$((RESTART_COUNT + 1))
+    if [ "$RESTART_COUNT" -ge "$MAX_RESTARTS_PER_MINUTE" ]; then
+      echo "[$(date -Iseconds)] ERROR: Too many restarts ($RESTART_COUNT in ${time_diff}s). Possible crash loop. Exiting."
+      exit 1
+    fi
+  else
+    RESTART_COUNT=1
+    RESTART_WINDOW_START=$current_time
+  fi
+}
+
 # Auto-restart loop
 while true; do
-  # agent-runner deletes /tmp/input.json after parsing it (contains secrets).
-  # If it's gone, the turn is over and we should exit cleanly instead of trying
-  # to restart and failing with "No such file or directory".
   if [ ! -f /tmp/input.json ]; then
-    echo "[$(date -Iseconds)] Input file consumed, exiting container cleanly"
+    echo "[$(date -Iseconds)] Input file missing before launch, treating turn as complete"
     exit 0
   fi
 
   echo "[$(date -Iseconds)] Starting node process..."
-  node /tmp/dist/index.js < /tmp/input.json
-  EXIT_CODE=$?
-  echo "[$(date -Iseconds)] Node exited with code $EXIT_CODE"
 
-  # Check for restart loop
-  CURRENT_TIME=$(date +%s)
-  TIME_DIFF=$((CURRENT_TIME - RESTART_WINDOW_START))
-
-  if [ $TIME_DIFF -lt 60 ]; then
-    RESTART_COUNT=$((RESTART_COUNT + 1))
-    if [ $RESTART_COUNT -ge $MAX_RESTARTS_PER_MINUTE ]; then
-      echo "[$(date -Iseconds)] ERROR: Too many restarts ($RESTART_COUNT in ${TIME_DIFF}s). Possible crash loop. Exiting."
-      exit 1
-    fi
+  launch_stderr=$(mktemp)
+  if node /tmp/dist/index.js 2>"$launch_stderr" < /tmp/input.json; then
+    EXIT_CODE=0
   else
-    # Reset counter if we're past the window
-    RESTART_COUNT=1
-    RESTART_WINDOW_START=$CURRENT_TIME
+    EXIT_CODE=$?
   fi
 
+  if [ "$EXIT_CODE" -ne 0 ] && [ ! -f /tmp/input.json ]; then
+    echo "[$(date -Iseconds)] Input file disappeared during launch, treating turn as complete"
+    rm -f "$launch_stderr"
+    exit 0
+  fi
+
+  if [ -s "$launch_stderr" ]; then
+    cat "$launch_stderr" >&2
+  fi
+
+  rm -f "$launch_stderr"
+
+  echo "[$(date -Iseconds)] Node exited with code $EXIT_CODE"
+  check_restart_budget
   sleep 1
 done
