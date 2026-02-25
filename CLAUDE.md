@@ -61,6 +61,7 @@ The container buildkit caches the build context aggressively. `--no-cache` alone
 
 ## Git Workflow
 
+- Before starting new work, sync your local `main` first: `git fetch --all --prune && git checkout main && git pull --rebase origin main`.
 - Prefer small, meaningful commits over large mixed commits.
 - Commit each logical change separately (runtime behavior, auth wiring, docs, etc.).
 - Use clear commit messages that explain intent, not just files touched.

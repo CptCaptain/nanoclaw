@@ -294,14 +294,18 @@ The task will run in that group's context with access to their files and memory.
 
 When making code changes to the NanoClaw project:
 
-1. **Always commit changes** after modifying code files
-2. **Create small, focused commits** - one logical change per commit
-3. **Write clear commit messages** that explain:
+1. **Sync local main first** before starting new implementation work:
+   - `git fetch --all --prune`
+   - `git checkout main`
+   - `git pull --rebase origin main`
+2. **Always commit changes** after modifying code files
+3. **Create small, focused commits** - one logical change per commit
+4. **Write clear commit messages** that explain:
    - What the problem was
    - What the solution does
    - Any technical details that help understand the change
-4. **Use conventional commit style** when appropriate (fix:, feat:, etc.)
-5. **Include Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>** in commit messages
+5. **Use conventional commit style** when appropriate (fix:, feat:, etc.)
+6. **Include Co-Authored-By: Klaus <klaus@plexico.space>** in commit messages
 
 Example workflow:
 - Make code changes to fix a bug
