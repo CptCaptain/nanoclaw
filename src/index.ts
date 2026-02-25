@@ -10,6 +10,8 @@ import {
   TELEGRAM_BOT_TOKEN,
   TELEGRAM_ONLY,
   TRIGGER_PATTERN,
+  WORKTREE_CLEANUP_INTERVAL_MS,
+  WORKTREE_STALE_DAYS,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel, initBotPool } from './channels/telegram.js';
@@ -41,6 +43,7 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import { startSchedulerLoop } from './task-scheduler.js';
+import { startWorktreeCleanupLoop } from './worktree-cleanup.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
 
@@ -906,7 +909,7 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
-async function sendStartupGreeting(channelErrors: string[]): Promise<void> {
+async function sendMainChannelMessage(text: string, warnMessage: string): Promise<void> {
   const mainEntry = Object.entries(registeredGroups).find(
     ([, g]) => g.folder === MAIN_GROUP_FOLDER,
   );
@@ -916,14 +919,18 @@ async function sendStartupGreeting(channelErrors: string[]): Promise<void> {
   const channel = findChannel(channels, mainJid);
   if (!channel) return;
 
+  await channel.sendMessage(mainJid, text).catch((err) =>
+    logger.warn({ err }, warnMessage),
+  );
+}
+
+async function sendStartupGreeting(channelErrors: string[]): Promise<void> {
   const msg =
     channelErrors.length > 0
       ? `Started. ⚠️ ${channelErrors.join('; ')}.`
       : 'Started.';
 
-  await channel.sendMessage(mainJid, msg).catch((err) =>
-    logger.warn({ err }, 'Failed to send startup greeting'),
-  );
+  await sendMainChannelMessage(msg, 'Failed to send startup greeting');
 }
 
 async function main(): Promise<void> {
@@ -984,6 +991,13 @@ async function main(): Promise<void> {
     logger.fatal({ channelErrors }, 'All channels failed to connect — shutting down');
     process.exit(1);
   }
+
+  startWorktreeCleanupLoop({
+    intervalMs: WORKTREE_CLEANUP_INTERVAL_MS,
+    staleDays: WORKTREE_STALE_DAYS,
+    onStaleAlert: async (text) =>
+      sendMainChannelMessage(text, 'Failed to send stale worktree alert'),
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({

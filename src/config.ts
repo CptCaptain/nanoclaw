@@ -20,6 +20,14 @@ export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
+export const WORKTREE_CLEANUP_INTERVAL_MS = Math.max(
+  0,
+  parseInt(process.env.WORKTREE_CLEANUP_INTERVAL_MS || '21600000', 10) || 0,
+); // default 6h
+export const WORKTREE_STALE_DAYS = Math.max(
+  1,
+  parseInt(process.env.WORKTREE_STALE_DAYS || '7', 10) || 7,
+);
 
 // Absolute paths needed for container mounts
 const PROJECT_ROOT = process.cwd();
