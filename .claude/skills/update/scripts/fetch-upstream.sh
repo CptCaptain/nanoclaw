@@ -25,11 +25,31 @@ if [ -z "$REMOTE" ]; then
   REMOTE="upstream"
 fi
 
-echo "Fetching from $REMOTE..."
-if ! git fetch "$REMOTE" main 2>&1; then
+REMOTE_BRANCH=""
+if git ls-remote --exit-code --heads "$REMOTE" main >/dev/null 2>&1; then
+  REMOTE_BRANCH="main"
+elif git ls-remote --exit-code --heads "$REMOTE" master >/dev/null 2>&1; then
+  REMOTE_BRANCH="master"
+else
+  REMOTE_HEAD=$(git ls-remote --symref "$REMOTE" HEAD 2>/dev/null | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')
+  if [ -n "$REMOTE_HEAD" ]; then
+    REMOTE_BRANCH="$REMOTE_HEAD"
+  fi
+fi
+
+if [ -z "$REMOTE_BRANCH" ]; then
   echo "<<< STATUS"
   echo "STATUS=error"
-  echo "ERROR=Failed to fetch from $REMOTE"
+  echo "ERROR=Could not determine remote branch for $REMOTE"
+  echo "STATUS >>>"
+  exit 1
+fi
+
+echo "Fetching from $REMOTE ($REMOTE_BRANCH)..."
+if ! git fetch "$REMOTE" "$REMOTE_BRANCH" 2>&1; then
+  echo "<<< STATUS"
+  echo "STATUS=error"
+  echo "ERROR=Failed to fetch from $REMOTE/$REMOTE_BRANCH"
   echo "STATUS >>>"
   exit 1
 fi
@@ -61,12 +81,12 @@ CANDIDATES=$(node -e "
 # git archive errors if a path doesn't exist, so we check first.
 PATHS=""
 for candidate in $CANDIDATES; do
-  if [ -n "$(git ls-tree --name-only "$REMOTE/main" "$candidate" 2>/dev/null)" ]; then
+  if [ -n "$(git ls-tree --name-only "$REMOTE/$REMOTE_BRANCH" "$candidate" 2>/dev/null)" ]; then
     PATHS="$PATHS $candidate"
   fi
 done
 
-git archive "$REMOTE/main" -- $PATHS | tar -x -C "$TEMP_DIR"
+git archive "$REMOTE/$REMOTE_BRANCH" -- $PATHS | tar -x -C "$TEMP_DIR"
 
 # Get new version from extracted package.json
 NEW_VERSION="unknown"

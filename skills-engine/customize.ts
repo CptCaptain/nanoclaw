@@ -88,10 +88,22 @@ export function commitCustomize(): void {
   for (const relativePath of changedFiles) {
     const basePath = path.join(baseDir, relativePath);
     const currentPath = path.join(cwd, relativePath);
+    const baseExists = fs.existsSync(basePath);
+    const currentExists = fs.existsSync(currentPath);
+
+    if (baseExists && currentExists) {
+      const baseIsDir = fs.statSync(basePath).isDirectory();
+      const currentIsDir = fs.statSync(currentPath).isDirectory();
+      if (baseIsDir !== currentIsDir) {
+        throw new Error(
+          `diff error for ${relativePath}: path type mismatch between base and current`,
+        );
+      }
+    }
 
     // Use /dev/null if either side doesn't exist
-    const oldPath = fs.existsSync(basePath) ? basePath : '/dev/null';
-    const newPath = fs.existsSync(currentPath) ? currentPath : '/dev/null';
+    const oldPath = baseExists ? basePath : '/dev/null';
+    const newPath = currentExists ? currentPath : '/dev/null';
 
     try {
       const diff = execFileSync('diff', ['-ruN', oldPath, newPath], {
@@ -104,7 +116,9 @@ export function commitCustomize(): void {
         // diff exits 1 when files differ — that's expected
         combinedPatch += execErr.stdout;
       } else if (execErr.status === 2) {
-        throw new Error(`diff error for ${relativePath}: diff exited with status 2 (check file permissions or encoding)`);
+        throw new Error(
+          `diff error for ${relativePath}: diff exited with status 2 (check file permissions or encoding)`,
+        );
       } else {
         throw err;
       }
