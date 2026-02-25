@@ -26,6 +26,8 @@ import { RegisteredGroup, ScheduledTask } from './types.js';
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
+  getModelForGroup?: (groupFolder: string) => string | undefined;
+  getRuntimeForGroup?: (groupFolder: string) => 'claude' | 'codex';
   queue: GroupQueue;
   onProcess: (groupJid: string, proc: ChildProcess, containerName: string, groupFolder: string) => void;
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -107,8 +109,13 @@ async function runTask(
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
+  const runtime = deps.getRuntimeForGroup?.(task.group_folder) || 'claude';
+  const scopedKey = `${task.group_folder}::${runtime}`;
   const sessionId =
-    task.context_mode === 'group' ? sessions[task.group_folder] : undefined;
+    task.context_mode === 'group'
+      ? sessions[scopedKey] || (runtime === 'claude' ? sessions[task.group_folder] : undefined)
+      : undefined;
+  const model = deps.getModelForGroup?.(task.group_folder);
 
   // After the task produces a result, close the container promptly.
   // Tasks are single-turn — no need to wait IDLE_TIMEOUT (30 min) for the
@@ -130,6 +137,8 @@ async function runTask(
       {
         prompt: task.prompt,
         sessionId,
+        runtime,
+        model,
         groupFolder: task.group_folder,
         chatJid: task.chat_jid,
         isMain,

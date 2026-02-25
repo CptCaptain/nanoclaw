@@ -1,4 +1,3 @@
-import { exec } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 
@@ -38,6 +37,12 @@ export class WhatsAppChannel implements Channel {
   private flushing = false;
   private groupSyncTimerStarted = false;
 
+  private failed = false;
+  private initialConnectResolve?: () => void;
+  private initialConnectReject?: (err: Error) => void;
+  private reconnectAttempts = 0;
+  private readonly MAX_RECONNECT_ATTEMPTS = 3;
+
   private opts: WhatsAppChannelOpts;
 
   constructor(opts: WhatsAppChannelOpts) {
@@ -46,11 +51,13 @@ export class WhatsAppChannel implements Channel {
 
   async connect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      this.connectInternal(resolve).catch(reject);
+      this.initialConnectResolve = resolve;
+      this.initialConnectReject = reject;
+      this.connectInternal().catch(reject);
     });
   }
 
-  private async connectInternal(onFirstOpen?: () => void): Promise<void> {
+  private async connectInternal(): Promise<void> {
     const authDir = path.join(STORE_DIR, 'auth');
     fs.mkdirSync(authDir, { recursive: true });
 
@@ -75,13 +82,13 @@ export class WhatsAppChannel implements Channel {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
-        const msg =
-          'WhatsApp authentication required. Run /setup in Claude Code.';
-        logger.error(msg);
-        exec(
-          `osascript -e 'display notification "${msg}" with title "NanoClaw" sound name "Basso"'`,
-        );
-        setTimeout(() => process.exit(1), 1000);
+        this.failed = true;
+        const err = new Error('session expired — run /setup to re-authenticate');
+        logger.error({ msg: err.message }, 'WhatsApp authentication required');
+        this.initialConnectReject?.(err);
+        this.initialConnectResolve = undefined;
+        this.initialConnectReject = undefined;
+        return;
       }
 
       if (connection === 'close') {
@@ -90,23 +97,43 @@ export class WhatsAppChannel implements Channel {
         const shouldReconnect = reason !== DisconnectReason.loggedOut;
         logger.info({ reason, shouldReconnect, queuedMessages: this.outgoingQueue.length }, 'Connection closed');
 
-        if (shouldReconnect) {
-          logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
-        } else {
-          logger.info('Logged out. Run /setup to re-authenticate.');
-          process.exit(0);
+        if (shouldReconnect && !this.failed) {
+          this.reconnectAttempts++;
+          if (this.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+            this.failed = true;
+            if (this.initialConnectReject) {
+              const err = new Error(
+                `WhatsApp: too many connection failures (reason: ${reason})`,
+              );
+              this.initialConnectReject(err);
+              this.initialConnectResolve = undefined;
+              this.initialConnectReject = undefined;
+            } else {
+              logger.error({ reason }, 'WhatsApp: too many reconnect failures, giving up');
+            }
+            return;
+          }
+          logger.info({ attempt: this.reconnectAttempts }, 'Reconnecting...');
+          this.connectInternal().catch((err) =>
+            logger.error({ err }, 'Reconnection failed'),
+          );
+        } else if (!shouldReconnect) {
+          logger.info('WhatsApp: logged out. Run /setup to re-authenticate.');
+          this.failed = true;
+          this.initialConnectReject?.(new Error('logged out — run /setup to re-authenticate'));
+          this.initialConnectResolve = undefined;
+          this.initialConnectReject = undefined;
         }
       } else if (connection === 'open') {
         this.connected = true;
+        this.reconnectAttempts = 0;
         logger.info('Connected to WhatsApp');
+
+        if (this.initialConnectResolve) {
+          this.initialConnectResolve();
+          this.initialConnectResolve = undefined;
+          this.initialConnectReject = undefined;
+        }
 
         // Announce availability so WhatsApp relays subsequent presence updates (typing indicators)
         this.sock.sendPresenceUpdate('available').catch((err) => {
@@ -140,12 +167,6 @@ export class WhatsAppChannel implements Channel {
               logger.error({ err }, 'Periodic group sync failed'),
             );
           }, GROUP_SYNC_INTERVAL_MS);
-        }
-
-        // Signal first connection to caller
-        if (onFirstOpen) {
-          onFirstOpen();
-          onFirstOpen = undefined;
         }
       }
     });

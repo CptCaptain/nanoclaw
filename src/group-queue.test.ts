@@ -421,4 +421,30 @@ describe('GroupQueue', () => {
     resolveProcess!();
     await vi.advanceTimersByTimeAsync(10);
   });
+
+  it('blocks message and task dispatch while globally paused', async () => {
+    const processMessages = vi.fn(async () => true);
+    queue.setProcessMessagesFn(processMessages);
+    queue.setPaused(true);
+
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueTask('group1@g.us', 'task-1', async () => {});
+    await vi.advanceTimersByTimeAsync(20);
+
+    expect(processMessages).not.toHaveBeenCalled();
+    const snap = queue.snapshot();
+    expect(snap.pendingMessages).toBe(1);
+    expect(snap.pendingTasks).toBe(1);
+  });
+
+  it('abortPending clears queued work for all groups', async () => {
+    queue.setPaused(true);
+    queue.enqueueMessageCheck('group1@g.us');
+    queue.enqueueTask('group1@g.us', 'task-1', async () => {});
+
+    queue.abortPending();
+
+    expect(queue.snapshot().pendingMessages).toBe(0);
+    expect(queue.snapshot().pendingTasks).toBe(0);
+  });
 });

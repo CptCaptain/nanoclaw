@@ -71,7 +71,7 @@ function createSchema(database: Database.Database): void {
     CREATE TABLE IF NOT EXISTS registered_groups (
       jid TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      folder TEXT NOT NULL UNIQUE,
+      folder TEXT NOT NULL,
       trigger_pattern TEXT NOT NULL,
       added_at TEXT NOT NULL,
       container_config TEXT,
@@ -426,7 +426,9 @@ export function getDueTasks(): ScheduledTask[] {
     .prepare(
       `
     SELECT * FROM scheduled_tasks
-    WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= ?
+    WHERE status = 'active'
+      AND next_run IS NOT NULL
+      AND next_run <= ?
     ORDER BY next_run
   `,
     )
@@ -447,6 +449,8 @@ export function updateTaskAfterRun(
   `,
   ).run(nextRun, now, lastResult, nextRun, id);
 }
+
+// Removed: markTaskAsRunning - we now track running tasks in-memory in the scheduler
 
 export function logTaskRun(log: TaskRunLog): void {
   db.prepare(
@@ -492,6 +496,10 @@ export function setSession(groupFolder: string, sessionId: string): void {
   db.prepare(
     'INSERT OR REPLACE INTO sessions (group_folder, session_id) VALUES (?, ?)',
   ).run(groupFolder, sessionId);
+}
+
+export function deleteSession(groupFolder: string): void {
+  db.prepare('DELETE FROM sessions WHERE group_folder = ?').run(groupFolder);
 }
 
 export function getAllSessions(): Record<string, string> {

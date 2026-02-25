@@ -58,3 +58,9 @@ systemctl --user restart nanoclaw
 ## Container Build Cache
 
 The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+
+## Git Workflow
+
+- Prefer small, meaningful commits over large mixed commits.
+- Commit each logical change separately (runtime behavior, auth wiring, docs, etc.).
+- Use clear commit messages that explain intent, not just files touched.

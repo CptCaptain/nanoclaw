@@ -40,11 +40,6 @@ vi.mock('fs', async () => {
   };
 });
 
-// Mock child_process (used for osascript notification)
-vi.mock('child_process', () => ({
-  exec: vi.fn(),
-}));
-
 // Build a fake WASocket that's an EventEmitter with the methods we need
 function createFakeSocket() {
   const ev = new EventEmitter();
@@ -247,28 +242,16 @@ describe('WhatsAppChannel', () => {
   // --- QR code and auth ---
 
   describe('authentication', () => {
-    it('exits process when QR code is emitted (no auth state)', async () => {
-      vi.useFakeTimers();
-      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-
+    it('rejects connect() when QR code is emitted (session expired)', async () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
-      // Start connect but don't await (it won't resolve - process exits)
-      channel.connect().catch(() => {});
+      const connectPromise = channel.connect();
+      await new Promise((r) => setTimeout(r, 0)); // flush microtasks
 
-      // Flush microtasks so connectInternal registers handlers
-      await vi.advanceTimersByTimeAsync(0);
-
-      // Emit QR code event
       fakeSocket._ev.emit('connection.update', { qr: 'some-qr-data' });
 
-      // Advance timer past the 1000ms setTimeout before exit
-      await vi.advanceTimersByTimeAsync(1500);
-
-      expect(mockExit).toHaveBeenCalledWith(1);
-      mockExit.mockRestore();
-      vi.useRealTimers();
+      await expect(connectPromise).rejects.toThrow('session expired');
     });
   });
 
@@ -290,23 +273,22 @@ describe('WhatsAppChannel', () => {
       // The channel should attempt to reconnect (calls connectInternal again)
     });
 
-    it('exits on loggedOut disconnect', async () => {
+    it('marks channel as failed on loggedOut disconnect (no process.exit)', async () => {
       const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
 
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
-      await connectChannel(channel);
+      await connectChannel(channel); // initial connect succeeded
 
-      // Disconnect with loggedOut reason (401)
-      triggerDisconnect(401);
+      triggerDisconnect(401); // loggedOut
 
       expect(channel.isConnected()).toBe(false);
-      expect(mockExit).toHaveBeenCalledWith(0);
+      expect(mockExit).not.toHaveBeenCalled();
       mockExit.mockRestore();
     });
 
-    it('retries reconnection after 5s on failure', async () => {
+    it('reconnects after non-loggedOut disconnect', async () => {
       const opts = createTestOpts();
       const channel = new WhatsAppChannel(opts);
 
@@ -317,6 +299,46 @@ describe('WhatsAppChannel', () => {
 
       // The channel sets a 5s retry — just verify it doesn't crash
       await new Promise((r) => setTimeout(r, 100));
+    });
+
+    it('rejects connect() after MAX_RECONNECT_ATTEMPTS failures', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      const connectPromise = channel.connect();
+      connectPromise.catch(() => {}); // suppress unhandled rejection warning
+      await new Promise((r) => setTimeout(r, 0)); // flush microtasks
+
+      // Trigger MAX disconnects before initial open (simulates 405 loop)
+      for (let i = 0; i < 3; i++) {
+        triggerDisconnect(428); // connectionClosed — not loggedOut
+        await new Promise((r) => setTimeout(r, 0));
+      }
+
+      await expect(connectPromise).rejects.toThrow('too many connection failures');
+    });
+
+    it('resets reconnect counter on successful connection', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      await connectChannel(channel);
+
+      // Disconnect and reconnect — this should reset the attempt counter
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 0));
+      triggerConnection('open');
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(channel.isConnected()).toBe(true);
+
+      // Now trigger 1 more disconnect — if the counter was reset, the cap
+      // should not fire (reconnectAttempts will be below MAX_RECONNECT_ATTEMPTS)
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 0));
+
+      // Channel should not be marked as permanently failed — it can still reconnect
+      expect((channel as any).failed).toBe(false);
     });
   });
 

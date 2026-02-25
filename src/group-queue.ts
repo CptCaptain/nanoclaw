@@ -33,6 +33,7 @@ export class GroupQueue {
   private processMessagesFn: ((groupJid: string) => Promise<boolean>) | null =
     null;
   private shuttingDown = false;
+  private paused = false;
 
   private getGroup(groupJid: string): GroupState {
     let state = this.groups.get(groupJid);
@@ -57,6 +58,65 @@ export class GroupQueue {
     this.processMessagesFn = fn;
   }
 
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+    if (!paused) {
+      this.drainWaiting();
+    }
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
+  snapshot(): {
+    active: number;
+    pendingMessages: number;
+    pendingTasks: number;
+    groups: Array<{
+      jid: string;
+      active: boolean;
+      pendingMessages: boolean;
+      pendingTasks: number;
+      containerName: string | null;
+      groupFolder: string | null;
+    }>;
+  } {
+    let pendingMessages = 0;
+    let pendingTasks = 0;
+
+    const groups = [...this.groups.entries()].map(([jid, state]) => {
+      if (state.pendingMessages) {
+        pendingMessages += 1;
+      }
+      pendingTasks += state.pendingTasks.length;
+
+      return {
+        jid,
+        active: state.active,
+        pendingMessages: state.pendingMessages,
+        pendingTasks: state.pendingTasks.length,
+        containerName: state.containerName,
+        groupFolder: state.groupFolder,
+      };
+    });
+
+    return {
+      active: this.activeCount,
+      pendingMessages,
+      pendingTasks,
+      groups,
+    };
+  }
+
+  abortPending(): void {
+    for (const [, state] of this.groups) {
+      state.pendingMessages = false;
+      state.pendingTasks = [];
+    }
+    this.waitingGroups = [];
+  }
+
   enqueueMessageCheck(groupJid: string): void {
     if (this.shuttingDown) return;
 
@@ -65,6 +125,15 @@ export class GroupQueue {
     if (state.active) {
       state.pendingMessages = true;
       logger.debug({ groupJid }, 'Container active, message queued');
+      return;
+    }
+
+    if (this.paused) {
+      state.pendingMessages = true;
+      if (!this.waitingGroups.includes(groupJid)) {
+        this.waitingGroups.push(groupJid);
+      }
+      logger.debug({ groupJid }, 'Queue globally paused, message queued');
       return;
     }
 
@@ -105,6 +174,15 @@ export class GroupQueue {
       return;
     }
 
+    if (this.paused) {
+      state.pendingTasks.push({ id: taskId, groupJid, fn });
+      if (!this.waitingGroups.includes(groupJid)) {
+        this.waitingGroups.push(groupJid);
+      }
+      logger.debug({ groupJid, taskId }, 'Queue globally paused, task queued');
+      return;
+    }
+
     if (this.activeCount >= MAX_CONCURRENT_CONTAINERS) {
       state.pendingTasks.push({ id: taskId, groupJid, fn });
       if (!this.waitingGroups.includes(groupJid)) {
@@ -140,6 +218,11 @@ export class GroupQueue {
     if (state.pendingTasks.length > 0) {
       this.closeStdin(groupJid);
     }
+  }
+
+  hasActiveContainer(groupJid: string): boolean {
+    const state = this.getGroup(groupJid);
+    return state.active && !state.isTaskContainer && !!state.groupFolder;
   }
 
   /**
@@ -274,6 +357,16 @@ export class GroupQueue {
 
     const state = this.getGroup(groupJid);
 
+    if (this.paused) {
+      if (
+        (state.pendingMessages || state.pendingTasks.length > 0) &&
+        !this.waitingGroups.includes(groupJid)
+      ) {
+        this.waitingGroups.push(groupJid);
+      }
+      return;
+    }
+
     // Tasks first (they won't be re-discovered from SQLite like messages)
     if (state.pendingTasks.length > 0) {
       const task = state.pendingTasks.shift()!;
@@ -296,6 +389,8 @@ export class GroupQueue {
   }
 
   private drainWaiting(): void {
+    if (this.paused) return;
+
     while (
       this.waitingGroups.length > 0 &&
       this.activeCount < MAX_CONCURRENT_CONTAINERS

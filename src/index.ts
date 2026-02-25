@@ -6,9 +6,13 @@ import {
   IDLE_TIMEOUT,
   MAIN_GROUP_FOLDER,
   POLL_INTERVAL,
+  TELEGRAM_BOT_POOL,
+  TELEGRAM_BOT_TOKEN,
+  TELEGRAM_ONLY,
   TRIGGER_PATTERN,
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
+import { TelegramChannel, initBotPool } from './channels/telegram.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -20,6 +24,7 @@ import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
+  deleteSession,
   getAllTasks,
   getMessagesSince,
   getNewMessages,
@@ -46,6 +51,8 @@ let lastTimestamp = '';
 let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
+let groupModels: Record<string, string> = {};
+const runtimeBootstrapPending: Record<string, { from: 'claude' | 'codex'; to: 'claude' | 'codex' }> = {};
 let messageLoopRunning = false;
 
 let whatsapp: WhatsAppChannel;
@@ -61,6 +68,15 @@ function loadState(): void {
     logger.warn('Corrupted last_agent_timestamp in DB, resetting');
     lastAgentTimestamp = {};
   }
+
+  const modelState = getRouterState('group_models');
+  try {
+    groupModels = modelState ? JSON.parse(modelState) : {};
+  } catch {
+    logger.warn('Corrupted group_models in DB, resetting');
+    groupModels = {};
+  }
+
   sessions = getAllSessions();
   registeredGroups = getAllRegisteredGroups();
   logger.info(
@@ -75,6 +91,7 @@ function saveState(): void {
     'last_agent_timestamp',
     JSON.stringify(lastAgentTimestamp),
   );
+  setRouterState('group_models', JSON.stringify(groupModels));
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -124,6 +141,408 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
   registeredGroups = groups;
 }
 
+type AgentRuntime = 'claude' | 'codex';
+
+type ParsedModelCommand =
+  | { action: 'show' | 'list' | 'reset' }
+  | { action: 'set'; model: string }
+  | { action: 'invalid'; error: string };
+
+function parseModelCommand(content: string): ParsedModelCommand | null {
+  let text = content.trim();
+  if (TRIGGER_PATTERN.test(text)) {
+    text = text.replace(TRIGGER_PATTERN, '').trim();
+  }
+
+  if (!text.toLowerCase().startsWith('/model')) return null;
+
+  const args = text.slice('/model'.length).trim();
+  if (!args) return { action: 'show' };
+
+  const lowerArgs = args.toLowerCase();
+  if (lowerArgs === 'list') return { action: 'list' };
+  if (['status', 'current', 'active'].includes(lowerArgs)) {
+    return { action: 'show' };
+  }
+  if (['default', 'reset', 'auto', 'clear'].includes(lowerArgs)) {
+    return { action: 'reset' };
+  }
+
+  if (!/^[a-zA-Z0-9._:-]{2,100}$/.test(args)) {
+    return {
+      action: 'invalid',
+      error:
+        'Invalid model name. Use letters/numbers plus . _ : - (example: /model sonnet).',
+    };
+  }
+
+  return { action: 'set', model: args };
+}
+
+function resolveRuntimeAndModel(modelSetting?: string): {
+  runtime: AgentRuntime;
+  model?: string;
+} {
+  if (!modelSetting) {
+    return { runtime: 'claude' };
+  }
+
+  const raw = modelSetting.trim();
+  if (!raw) {
+    return { runtime: 'claude' };
+  }
+
+  let runtime: AgentRuntime;
+  let model = raw;
+
+  const colonIdx = raw.indexOf(':');
+  if (colonIdx > 0) {
+    const prefix = raw.slice(0, colonIdx).toLowerCase();
+    if (prefix === 'codex' || prefix === 'openai') {
+      runtime = 'codex';
+      model = raw.slice(colonIdx + 1).trim();
+      return model ? { runtime, model } : { runtime };
+    }
+    if (prefix === 'claude') {
+      runtime = 'claude';
+      model = raw.slice(colonIdx + 1).trim();
+      return model ? { runtime, model } : { runtime };
+    }
+  }
+
+  const lower = raw.toLowerCase();
+  if (lower === 'codex' || lower === 'openai') {
+    return { runtime: 'codex' };
+  }
+  if (lower === 'claude') {
+    return { runtime: 'claude' };
+  }
+
+  runtime = /^(gpt-|o[1-9]|codex)/.test(lower) ? 'codex' : 'claude';
+  return { runtime, model: raw };
+}
+
+function currentModelLabel(groupFolder: string): string {
+  const modelSetting = groupModels[groupFolder];
+  if (!modelSetting) return 'default (claude runtime)';
+  const { runtime, model } = resolveRuntimeAndModel(modelSetting);
+  return model ? `${model} (${runtime})` : `default (${runtime})`;
+}
+
+function getRuntimeForGroup(groupFolder: string): AgentRuntime {
+  return resolveRuntimeAndModel(groupModels[groupFolder]).runtime;
+}
+
+function getModelForGroup(groupFolder: string): string | undefined {
+  return resolveRuntimeAndModel(groupModels[groupFolder]).model;
+}
+
+function sessionKey(groupFolder: string, runtime: AgentRuntime): string {
+  return `${groupFolder}::${runtime}`;
+}
+
+function getSessionId(groupFolder: string, runtime: AgentRuntime): string | undefined {
+  // Backwards compatibility: old installs stored only one session per group.
+  if (runtime === 'claude') {
+    return sessions[sessionKey(groupFolder, runtime)] || sessions[groupFolder];
+  }
+  return sessions[sessionKey(groupFolder, runtime)];
+}
+
+function setSessionId(groupFolder: string, runtime: AgentRuntime, sessionId: string): void {
+  const key = sessionKey(groupFolder, runtime);
+  sessions[key] = sessionId;
+  setSession(key, sessionId);
+
+  // Migrate legacy key for Claude so older tooling keeps seeing the active session.
+  if (runtime === 'claude') {
+    sessions[groupFolder] = sessionId;
+    setSession(groupFolder, sessionId);
+  }
+}
+
+function clearRuntimeSession(groupFolder: string, runtime: AgentRuntime): void {
+  const key = sessionKey(groupFolder, runtime);
+  delete sessions[key];
+  deleteSession(key);
+
+  if (runtime === 'claude') {
+    delete sessions[groupFolder];
+    deleteSession(groupFolder);
+  }
+}
+
+async function sendControlMessage(
+  channel: Channel,
+  chatJid: string,
+  text: string,
+): Promise<void> {
+  try {
+    await channel.sendMessage(chatJid, text);
+  } catch (err) {
+    logger.warn({ chatJid, err }, 'Failed to send control message');
+  }
+}
+
+async function applyModelCommands(
+  messages: NewMessage[],
+  group: RegisteredGroup,
+  chatJid: string,
+  channel: Channel,
+): Promise<NewMessage[]> {
+  const userMessages: NewMessage[] = [];
+
+  for (const msg of messages) {
+    const command = parseModelCommand(msg.content);
+    if (!command) {
+      userMessages.push(msg);
+      continue;
+    }
+
+    if (command.action === 'show') {
+      const runtime = getRuntimeForGroup(group.folder);
+      const model = getModelForGroup(group.folder) || 'default';
+      const activeSession = getSessionId(group.folder, runtime);
+      const claudeSession = getSessionId(group.folder, 'claude');
+      const codexSession = getSessionId(group.folder, 'codex');
+      const switchPending = runtimeBootstrapPending[chatJid];
+
+      await sendControlMessage(
+        channel,
+        chatJid,
+        [
+          `Active runtime: ${runtime}`,
+          `Configured model: ${model}`,
+          `Current label: ${currentModelLabel(group.folder)}`,
+          `Active session: ${activeSession || 'none'}`,
+          `Sessions (claude/codex): ${claudeSession || 'none'} / ${codexSession || 'none'}`,
+          switchPending
+            ? `Pending runtime handoff: ${switchPending.from} -> ${switchPending.to}`
+            : 'Pending runtime handoff: none',
+          'Use /model <name> to switch (e.g. opus, gpt-5, codex:gpt-5).',
+        ].join('\n'),
+      );
+      continue;
+    }
+
+    if (command.action === 'list') {
+      await sendControlMessage(
+        channel,
+        chatJid,
+        'Examples: sonnet, opus, haiku (Claude) or gpt-5/o3 (Codex). You can force runtime with prefixes like codex:gpt-5 or claude:opus, or use /model codex for Codex defaults.',
+      );
+      continue;
+    }
+
+    if (command.action === 'reset') {
+      const previousRuntime = getRuntimeForGroup(group.folder);
+      delete groupModels[group.folder];
+      const nextRuntime = getRuntimeForGroup(group.folder);
+
+      if (previousRuntime !== nextRuntime) {
+        runtimeBootstrapPending[chatJid] = {
+          from: previousRuntime,
+          to: nextRuntime,
+        };
+        clearRuntimeSession(group.folder, nextRuntime);
+        // Close active container so next message starts under the new runtime.
+        queue.closeStdin(chatJid);
+      }
+
+      saveState();
+      await sendControlMessage(
+        channel,
+        chatJid,
+        previousRuntime !== nextRuntime
+          ? 'Model reset to default for this chat. Runtime switched; I will hand over recent context on the next message.'
+          : 'Model reset to default for this chat.',
+      );
+      continue;
+    }
+
+    if (command.action === 'invalid') {
+      await sendControlMessage(channel, chatJid, command.error);
+      continue;
+    }
+
+    if (command.action === 'set') {
+      const previousRuntime = getRuntimeForGroup(group.folder);
+      groupModels[group.folder] = command.model;
+      const resolved = resolveRuntimeAndModel(command.model);
+
+      if (previousRuntime !== resolved.runtime) {
+        runtimeBootstrapPending[chatJid] = {
+          from: previousRuntime,
+          to: resolved.runtime,
+        };
+        clearRuntimeSession(group.folder, resolved.runtime);
+        // Close active container so next message starts under the new runtime.
+        queue.closeStdin(chatJid);
+      }
+
+      saveState();
+      const label = resolved.model
+        ? `${resolved.model} (${resolved.runtime})`
+        : `default (${resolved.runtime})`;
+      await sendControlMessage(
+        channel,
+        chatJid,
+        previousRuntime !== resolved.runtime
+          ? `Model/runtime set to ${label} for this chat. Runtime switched; I will hand over recent context on the next message.`
+          : `Model set to ${label} for this chat.`,
+      );
+    }
+  }
+
+  return userMessages;
+}
+
+function stripModelCommands(messages: NewMessage[]): NewMessage[] {
+  return messages.filter((m) => !parseModelCommand(m.content));
+}
+
+const PERSISTENT_FILE_LIMIT = 12_000;
+const PERSISTENT_TOTAL_LIMIT = 64_000;
+const HANDOFF_COMPACT_LIMIT = 70_000;
+
+function escapePromptXml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function readFileSnippet(filePath: string, maxChars: number): string | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const content = fs.readFileSync(filePath, 'utf-8').trim();
+    if (!content) return null;
+    return content.slice(0, maxChars);
+  } catch {
+    return null;
+  }
+}
+
+function buildPersistentContextBlock(group: RegisteredGroup): string | null {
+  const groupDir = resolveGroupFolderPath(group.folder);
+  const projectRoot = process.cwd();
+  const candidates = [
+    path.join(projectRoot, 'AGENTS.md'),
+    path.join(projectRoot, 'SOUL.md'),
+    path.join(projectRoot, 'soul.md'),
+    path.join(projectRoot, 'groups', 'global', 'CLAUDE.md'),
+    path.join(groupDir, 'AGENTS.md'),
+    path.join(groupDir, 'SOUL.md'),
+    path.join(groupDir, 'soul.md'),
+    path.join(groupDir, 'CLAUDE.md'),
+  ];
+
+  // Include additional persona-like markdown files from group root.
+  try {
+    for (const entry of fs.readdirSync(groupDir)) {
+      if (!entry.toLowerCase().endsWith('.md')) continue;
+      if (!/(soul|agent|persona|character|style|identity)/i.test(entry)) continue;
+      candidates.push(path.join(groupDir, entry));
+    }
+  } catch {
+    // ignore
+  }
+
+  const seen = new Set<string>();
+  const blocks: string[] = [];
+  let total = 0;
+
+  for (const filePath of candidates) {
+    if (seen.has(filePath)) continue;
+    seen.add(filePath);
+
+    const remaining = PERSISTENT_TOTAL_LIMIT - total;
+    if (remaining <= 0) break;
+
+    const snippet = readFileSnippet(
+      filePath,
+      Math.min(PERSISTENT_FILE_LIMIT, remaining),
+    );
+    if (!snippet) continue;
+
+    const escapedPath = escapePromptXml(filePath);
+    const escapedContent = escapePromptXml(snippet);
+    const block = `<context_file path="${escapedPath}">\n${escapedContent}\n</context_file>`;
+    blocks.push(block);
+    total += snippet.length;
+  }
+
+  if (blocks.length === 0) return null;
+
+  return [
+    '<persistent_context>',
+    'The following files define long-lived assistant behavior/persona/memory. Keep them active unless the user explicitly overrides them.',
+    blocks.join('\n\n'),
+    '</persistent_context>',
+  ].join('\n');
+}
+
+function buildRuntimeSwitchHandoff(
+  chatJid: string,
+  bootstrap: { from: AgentRuntime; to: AgentRuntime },
+): { recentMessages: NewMessage[]; handoffBlock: string | null } {
+  const fullHistory = stripModelCommands(
+    getMessagesSince(chatJid, '', ASSISTANT_NAME),
+  );
+
+  if (fullHistory.length === 0) {
+    return { recentMessages: [], handoffBlock: null };
+  }
+
+  const window = fullHistory.slice(-600);
+  const recentMessages = window.slice(-140);
+  const older = window.slice(0, Math.max(0, window.length - recentMessages.length));
+
+  const compactLines: string[] = [];
+  let used = 0;
+  for (let i = older.length - 1; i >= 0; i--) {
+    const m = older[i];
+    const compact = `${m.timestamp} | ${m.sender_name}: ${m.content.replace(/\s+/g, ' ').trim().slice(0, 220)}`;
+    if (!compact.trim()) continue;
+    if (used + compact.length > HANDOFF_COMPACT_LIMIT) break;
+    compactLines.push(compact);
+    used += compact.length;
+  }
+  compactLines.reverse();
+
+  const handoffBlock = [
+    `<runtime_handoff from="${bootstrap.from}" to="${bootstrap.to}">`,
+    'The provider/runtime switched. Continue the same conversation seamlessly.',
+    'Recent turns are included below in full message form. Older turns are compacted here:',
+    ...compactLines.map((line) => `- ${escapePromptXml(line)}`),
+    '</runtime_handoff>',
+  ].join('\n');
+
+  return {
+    recentMessages: recentMessages.length > 0 ? recentMessages : window,
+    handoffBlock,
+  };
+}
+
+function buildPromptWithContext(
+  group: RegisteredGroup,
+  messages: NewMessage[],
+  extraBlocks: string[] = [],
+): string {
+  const sections: string[] = [];
+
+  for (const block of extraBlocks) {
+    if (block && block.trim()) sections.push(block.trim());
+  }
+
+  const persistent = buildPersistentContextBlock(group);
+  if (persistent) sections.push(persistent);
+
+  sections.push(formatMessages(messages));
+  return sections.join('\n\n');
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -133,10 +552,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!group) return true;
 
   const channel = findChannel(channels, chatJid);
-  if (!channel) {
-    console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-    return true;
-  }
+  if (!channel) return true;
 
   const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
 
@@ -153,8 +569,6 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
-
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
   const previousCursor = lastAgentTimestamp[chatJid] || '';
@@ -162,8 +576,49 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     missedMessages[missedMessages.length - 1].timestamp;
   saveState();
 
+  const userMessages = await applyModelCommands(
+    missedMessages,
+    group,
+    chatJid,
+    channel,
+  );
+
+  if (userMessages.length === 0) {
+    logger.info(
+      { group: group.name, messageCount: missedMessages.length },
+      'Processed control command(s) with no agent invocation',
+    );
+    return true;
+  }
+
+  let promptMessages = userMessages;
+  const extraPromptBlocks: string[] = [];
+
+  const bootstrap = runtimeBootstrapPending[chatJid];
+  if (bootstrap) {
+    const handoff = buildRuntimeSwitchHandoff(chatJid, bootstrap);
+    if (handoff.recentMessages.length > 0) {
+      promptMessages = handoff.recentMessages;
+    }
+    if (handoff.handoffBlock) {
+      extraPromptBlocks.push(handoff.handoffBlock);
+    }
+    delete runtimeBootstrapPending[chatJid];
+    logger.info(
+      {
+        group: group.name,
+        fromRuntime: bootstrap.from,
+        toRuntime: bootstrap.to,
+        historyMessages: promptMessages.length,
+      },
+      'Bootstrapping runtime switch with compacted history handoff',
+    );
+  }
+
+  const prompt = buildPromptWithContext(group, promptMessages, extraPromptBlocks);
+
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: promptMessages.length },
     'Processing messages',
   );
 
@@ -233,7 +688,9 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+  const runtime = getRuntimeForGroup(group.folder);
+  const sessionId = getSessionId(group.folder, runtime);
+  const model = getModelForGroup(group.folder);
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -264,8 +721,7 @@ async function runAgent(
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
         if (output.newSessionId) {
-          sessions[group.folder] = output.newSessionId;
-          setSession(group.folder, output.newSessionId);
+          setSessionId(group.folder, runtime, output.newSessionId);
         }
         await onOutput(output);
       }
@@ -277,6 +733,8 @@ async function runAgent(
       {
         prompt,
         sessionId,
+        runtime,
+        model,
         groupFolder: group.folder,
         chatJid,
         isMain,
@@ -287,8 +745,7 @@ async function runAgent(
     );
 
     if (output.newSessionId) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
+      setSessionId(group.folder, runtime, output.newSessionId);
     }
 
     if (output.status === 'error') {
@@ -343,10 +800,7 @@ async function startMessageLoop(): Promise<void> {
           if (!group) continue;
 
           const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-            continue;
-          }
+          if (!channel) continue;
 
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
@@ -370,20 +824,52 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend);
 
-          if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
+          // If a container is already active, handle model commands here and
+          // pipe only non-command messages into the running session.
+          if (queue.hasActiveContainer(chatJid)) {
+            if (runtimeBootstrapPending[chatJid]) {
+              // Runtime just switched; avoid piping to the old active runtime.
+              queue.closeStdin(chatJid);
+              queue.enqueueMessageCheck(chatJid);
+              continue;
+            }
+
+            const userMessages = await applyModelCommands(
+              messagesToSend,
+              group,
+              chatJid,
+              channel,
             );
-            lastAgentTimestamp[chatJid] =
-              messagesToSend[messagesToSend.length - 1].timestamp;
-            saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+
+            if (userMessages.length === 0) {
+              lastAgentTimestamp[chatJid] =
+                messagesToSend[messagesToSend.length - 1].timestamp;
+              saveState();
+              logger.debug(
+                { chatJid, count: messagesToSend.length },
+                'Processed control command(s) for active container',
+              );
+              continue;
+            }
+
+            const formatted = buildPromptWithContext(group, userMessages);
+            if (queue.sendMessage(chatJid, formatted)) {
+              lastAgentTimestamp[chatJid] =
+                messagesToSend[messagesToSend.length - 1].timestamp;
+              saveState();
+              logger.debug(
+                { chatJid, count: userMessages.length },
+                'Piped messages to active container',
+              );
+              // Show typing indicator while the container processes the piped message
+              channel.setTyping?.(chatJid, true)?.catch((err) =>
+                logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
+              );
+            } else {
+              // Race: container died after hasActiveContainer check
+              queue.enqueueMessageCheck(chatJid);
+            }
           } else {
             // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
@@ -420,6 +906,26 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
+async function sendStartupGreeting(channelErrors: string[]): Promise<void> {
+  const mainEntry = Object.entries(registeredGroups).find(
+    ([, g]) => g.folder === MAIN_GROUP_FOLDER,
+  );
+  if (!mainEntry) return; // fresh install, no main group registered yet
+
+  const [mainJid] = mainEntry;
+  const channel = findChannel(channels, mainJid);
+  if (!channel) return;
+
+  const msg =
+    channelErrors.length > 0
+      ? `Started. ⚠️ ${channelErrors.join('; ')}.`
+      : 'Started.';
+
+  await channel.sendMessage(mainJid, msg).catch((err) =>
+    logger.warn({ err }, 'Failed to send startup greeting'),
+  );
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
@@ -444,23 +950,52 @@ async function main(): Promise<void> {
     registeredGroups: () => registeredGroups,
   };
 
-  // Create and connect channels
-  whatsapp = new WhatsAppChannel(channelOpts);
-  channels.push(whatsapp);
-  await whatsapp.connect();
+  // Create and connect channels — failures are non-fatal as long as one channel works
+  const channelErrors: string[] = [];
+
+  if (!TELEGRAM_ONLY) {
+    whatsapp = new WhatsAppChannel(channelOpts);
+    try {
+      await whatsapp.connect();
+      channels.push(whatsapp);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err }, 'WhatsApp failed to connect — continuing without it');
+      channelErrors.push(`WhatsApp: ${msg}`);
+    }
+  }
+
+  if (TELEGRAM_BOT_TOKEN) {
+    const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
+    try {
+      await telegram.connect();
+      channels.push(telegram);
+      if (TELEGRAM_BOT_POOL.length > 0) {
+        await initBotPool(TELEGRAM_BOT_POOL);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn({ err }, 'Telegram failed to connect — continuing without it');
+      channelErrors.push(`Telegram: ${msg}`);
+    }
+  }
+
+  if (channels.length === 0) {
+    logger.fatal({ channelErrors }, 'All channels failed to connect — shutting down');
+    process.exit(1);
+  }
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,
+    getModelForGroup,
+    getRuntimeForGroup,
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
-      if (!channel) {
-        console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
-        return;
-      }
+      if (!channel) return;
       const text = formatOutbound(rawText);
       if (text) await channel.sendMessage(jid, text);
     },
@@ -479,6 +1014,7 @@ async function main(): Promise<void> {
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
+  await sendStartupGreeting(channelErrors);
   startMessageLoop().catch((err) => {
     logger.fatal({ err }, 'Message loop crashed unexpectedly');
     process.exit(1);

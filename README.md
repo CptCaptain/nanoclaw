@@ -65,19 +65,29 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 
 ## Usage
 
-Talk to your assistant with the trigger word (default: `@Andy`):
+Talk to your assistant with the trigger word (default: `@Klaus`):
 
 ```
-@Andy send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
-@Andy review the git history for the past week each Friday and update the README if there's drift
-@Andy every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+@Klaus send an overview of the sales pipeline every weekday morning at 9am (has access to my Obsidian vault folder)
+@Klaus review the git history for the past week each Friday and update the README if there's drift
+@Klaus every Monday at 8am, compile news on AI developments from Hacker News and TechCrunch and message me a briefing
+```
+
+You can also switch models per chat on the fly:
+```
+@Klaus /model opus
+@Klaus /model gpt-5
+@Klaus /model codex:gpt-5
+@Klaus /model default
+@Klaus /model
+@Klaus /model status
 ```
 
 From the main channel (your self-chat), you can manage groups and tasks:
 ```
-@Andy list all scheduled tasks across groups
-@Andy pause the Monday briefing task
-@Andy join the Family Chat group
+@Klaus list all scheduled tasks across groups
+@Klaus pause the Monday briefing task
+@Klaus join the Family Chat group
 ```
 
 ## Customizing

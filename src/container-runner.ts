@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -29,6 +30,8 @@ const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
+  model?: string;
+  runtime?: 'claude' | 'codex';
   groupFolder: string;
   chatJid: string;
   isMain: boolean;
@@ -48,6 +51,207 @@ interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
+}
+
+const CLAUDE_RUNTIME_ENV_DEFAULTS: Record<string, string> = {
+  // Enable agent swarms (subagent orchestration)
+  // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
+  CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+  // Load CLAUDE.md from additional mounted directories
+  // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
+  CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+  // Enable Claude's memory feature (persists user preferences between sessions)
+  // https://code.claude.com/docs/en/memory#manage-auto-memory
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
+};
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readJsonObject(filePath: string): Record<string, unknown> | undefined {
+  if (!fs.existsSync(filePath)) return undefined;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    return isObject(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function copyFileIfSourceNewer(sourcePath: string, targetPath: string): boolean {
+  if (!fs.existsSync(sourcePath)) return false;
+
+  const sourceStat = fs.statSync(sourcePath);
+  const targetExists = fs.existsSync(targetPath);
+  if (targetExists) {
+    const targetStat = fs.statSync(targetPath);
+    if (targetStat.mtimeMs >= sourceStat.mtimeMs) {
+      return false;
+    }
+  }
+
+  fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+  fs.copyFileSync(sourcePath, targetPath);
+  return true;
+}
+
+function latestMtimeRecursive(dirPath: string): number {
+  if (!fs.existsSync(dirPath)) return 0;
+
+  let latest = 0;
+  const stack = [dirPath];
+
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const stat = fs.statSync(current);
+    if (stat.mtimeMs > latest) latest = stat.mtimeMs;
+
+    if (!stat.isDirectory()) continue;
+
+    for (const entry of fs.readdirSync(current)) {
+      stack.push(path.join(current, entry));
+    }
+  }
+
+  return latest;
+}
+
+function writeGroupClaudeSettings(groupSessionsDir: string): void {
+  const settingsFile = path.join(groupSessionsDir, 'settings.json');
+  const hostSettingsFile = path.join(os.homedir(), '.claude', 'settings.json');
+
+  const hostSettings = readJsonObject(hostSettingsFile) || {};
+  const existingSettings = readJsonObject(settingsFile) || {};
+
+  const mergedSettings: Record<string, unknown> = {
+    ...hostSettings,
+    ...existingSettings,
+  };
+
+  const hostEnv = isObject(hostSettings.env)
+    ? (hostSettings.env as Record<string, string>)
+    : {};
+  const existingEnv = isObject(existingSettings.env)
+    ? (existingSettings.env as Record<string, string>)
+    : {};
+
+  mergedSettings.env = {
+    ...hostEnv,
+    ...existingEnv,
+    ...CLAUDE_RUNTIME_ENV_DEFAULTS,
+  };
+
+  fs.writeFileSync(settingsFile, JSON.stringify(mergedSettings, null, 2) + '\n');
+}
+
+const NANOCLAW_CODEX_CONFIG_START = '# NANOCLAW_MANAGED_START';
+const NANOCLAW_CODEX_CONFIG_END = '# NANOCLAW_MANAGED_END';
+
+function upsertManagedCodexConfig(configContent: string): string {
+  const managedBlock = [
+    NANOCLAW_CODEX_CONFIG_START,
+    '[mcp_servers.nanoclaw]',
+    'command = "node"',
+    'args = ["/tmp/dist/ipc-mcp-stdio.js"]',
+    '',
+    '[projects."/workspace/group"]',
+    'trust_level = "trusted"',
+    NANOCLAW_CODEX_CONFIG_END,
+  ].join('\n');
+
+  const hasManagedBlock =
+    configContent.includes(NANOCLAW_CODEX_CONFIG_START) &&
+    configContent.includes(NANOCLAW_CODEX_CONFIG_END);
+
+  if (hasManagedBlock) {
+    return configContent.replace(
+      new RegExp(
+        `${NANOCLAW_CODEX_CONFIG_START}[\\s\\S]*?${NANOCLAW_CODEX_CONFIG_END}`,
+        'm',
+      ),
+      managedBlock,
+    );
+  }
+
+  const trimmed = configContent.trim();
+  if (!trimmed) return `${managedBlock}\n`;
+  return `${trimmed}\n\n${managedBlock}\n`;
+}
+
+function syncHostCodexState(groupFolder: string): string {
+  const groupCodexDir = path.join(DATA_DIR, 'sessions', groupFolder, '.codex');
+  fs.mkdirSync(groupCodexDir, { recursive: true });
+
+  const hostCodexDir = path.join(os.homedir(), '.codex');
+  const hostAuth = path.join(hostCodexDir, 'auth.json');
+  const groupAuth = path.join(groupCodexDir, 'auth.json');
+  if (copyFileIfSourceNewer(hostAuth, groupAuth)) {
+    logger.debug({ groupFolder }, 'Synced Codex auth.json to group session');
+  }
+
+  const hostConfig = path.join(hostCodexDir, 'config.toml');
+  const groupConfig = path.join(groupCodexDir, 'config.toml');
+
+  let baseConfig = '';
+  if (fs.existsSync(groupConfig)) {
+    baseConfig = fs.readFileSync(groupConfig, 'utf-8');
+  } else if (fs.existsSync(hostConfig)) {
+    baseConfig = fs.readFileSync(hostConfig, 'utf-8');
+  }
+
+  // If host config changed after the group config was written, refresh from host.
+  if (fs.existsSync(hostConfig) && fs.existsSync(groupConfig)) {
+    const hostMtime = fs.statSync(hostConfig).mtimeMs;
+    const groupMtime = fs.statSync(groupConfig).mtimeMs;
+    if (hostMtime > groupMtime) {
+      baseConfig = fs.readFileSync(hostConfig, 'utf-8');
+    }
+  }
+
+  const mergedConfig = upsertManagedCodexConfig(baseConfig);
+  fs.writeFileSync(groupConfig, mergedConfig);
+
+  return groupCodexDir;
+}
+
+function syncHostClaudeAuthArtifacts(
+  groupFolder: string,
+  groupSessionsDir: string,
+): string | undefined {
+  const hostClaudeDir = path.join(os.homedir(), '.claude');
+  if (fs.existsSync(hostClaudeDir)) {
+    const authCandidates = new Set<string>(['.credentials.json']);
+    for (const entry of fs.readdirSync(hostClaudeDir)) {
+      if (!entry.endsWith('.json')) continue;
+      if (/(credential|oauth|auth|token|provider)/i.test(entry)) {
+        authCandidates.add(entry);
+      }
+    }
+
+    for (const filename of authCandidates) {
+      const sourcePath = path.join(hostClaudeDir, filename);
+      const targetPath = path.join(groupSessionsDir, filename);
+      if (copyFileIfSourceNewer(sourcePath, targetPath)) {
+        logger.debug(
+          { groupFolder, filename },
+          'Synced Claude auth artifact to group session',
+        );
+      }
+    }
+  }
+
+  const hostDotClaudeJson = path.join(os.homedir(), '.claude.json');
+  const groupSessionRoot = path.join(DATA_DIR, 'sessions', groupFolder);
+  const groupDotClaudeJson = path.join(groupSessionRoot, '.claude.json');
+  if (copyFileIfSourceNewer(hostDotClaudeJson, groupDotClaudeJson)) {
+    logger.debug(
+      { groupFolder, filename: '.claude.json' },
+      'Synced Claude global state to group session',
+    );
+  }
+
+  return fs.existsSync(groupDotClaudeJson) ? groupDotClaudeJson : undefined;
 }
 
 function buildVolumeMounts(
@@ -105,22 +309,20 @@ function buildVolumeMounts(
     '.claude',
   );
   fs.mkdirSync(groupSessionsDir, { recursive: true });
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, JSON.stringify({
-      env: {
-        // Enable agent swarms (subagent orchestration)
-        // https://code.claude.com/docs/en/agent-teams#orchestrate-teams-of-claude-code-sessions
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        // Load CLAUDE.md from additional mounted directories
-        // https://code.claude.com/docs/en/memory#load-memory-from-additional-directories
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        // Enable Claude's memory feature (persists user preferences between sessions)
-        // https://code.claude.com/docs/en/memory#manage-auto-memory
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
-    }, null, 2) + '\n');
-  }
+
+  // Merge host user settings (if present) with NanoClaw-required runtime flags.
+  // This propagates provider/model configuration while preserving sandbox defaults.
+  writeGroupClaudeSettings(groupSessionsDir);
+
+  // Copy host auth artifacts into the per-group .claude directory so
+  // subscription-based auth (no API key) can work inside containers.
+  // Files are copied only when host copy is newer; per-group updates are preserved.
+  const groupDotClaudeJson = syncHostClaudeAuthArtifacts(
+    group.folder,
+    groupSessionsDir,
+  );
+
+  const groupCodexDir = syncHostCodexState(group.folder);
 
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
@@ -130,12 +332,40 @@ function buildVolumeMounts(
       const srcDir = path.join(skillsSrc, skillDir);
       if (!fs.statSync(srcDir).isDirectory()) continue;
       const dstDir = path.join(skillsDst, skillDir);
+      // Remove stale symlinks or directories that may have been created by previous container runs
+      // (containers sometimes symlink skills to /workspace/project paths which don't exist on host)
+      try {
+        const stat = fs.lstatSync(dstDir);
+        if (stat.isSymbolicLink()) {
+          fs.unlinkSync(dstDir);
+        } else if (stat.isDirectory()) {
+          fs.rmSync(dstDir, { recursive: true });
+        }
+      } catch {
+        // Path doesn't exist, that's fine
+      }
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
+    readonly: false,
+  });
+
+  // Claude also reads ~/.claude.json for account-level state.
+  // Mount the per-group copy read-only when available.
+  if (groupDotClaudeJson) {
+    mounts.push({
+      hostPath: groupDotClaudeJson,
+      containerPath: '/home/node/.claude.json',
+      readonly: true,
+    });
+  }
+
+  mounts.push({
+    hostPath: groupCodexDir,
+    containerPath: '/home/node/.codex',
     readonly: false,
   });
 
@@ -156,8 +386,17 @@ function buildVolumeMounts(
   // groups. Recompiled on container startup via entrypoint.sh.
   const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   const groupAgentRunnerDir = path.join(DATA_DIR, 'sessions', group.folder, 'agent-runner-src');
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    const srcMtime = latestMtimeRecursive(agentRunnerSrc);
+    const dstMtime = latestMtimeRecursive(groupAgentRunnerDir);
+    if (!fs.existsSync(groupAgentRunnerDir) || srcMtime > dstMtime) {
+      fs.rmSync(groupAgentRunnerDir, { recursive: true, force: true });
+      fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+      logger.info(
+        { group: group.folder },
+        'Updated per-group agent runner source from project template',
+      );
+    }
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
@@ -183,7 +422,11 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  return readEnvFile([
+    'CLAUDE_CODE_OAUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+    'OPENAI_API_KEY',
+  ]);
 }
 
 function buildContainerArgs(mounts: VolumeMount[], containerName: string): string[] {
@@ -474,6 +717,8 @@ export async function runContainerAgent(
           `=== Input Summary ===`,
           `Prompt length: ${input.prompt.length} chars`,
           `Session ID: ${input.sessionId || 'new'}`,
+          `Runtime: ${input.runtime || 'claude'}`,
+          `Model: ${input.model || 'default'}`,
           ``,
           `=== Mounts ===`,
           mounts

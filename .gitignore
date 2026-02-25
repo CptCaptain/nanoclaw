@@ -32,4 +32,7 @@ groups/global/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
+# Local git worktrees
+.worktrees/
+
 agents-sdk-docs
