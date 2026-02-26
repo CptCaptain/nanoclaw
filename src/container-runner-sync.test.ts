@@ -4,7 +4,7 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { copyFileIfSourceNewer } from './container-runner.js';
+import { copyFileIfSourceNewer, syncAgentWorkSkills } from './container-runner.js';
 
 describe('copyFileIfSourceNewer', () => {
   let tmpDir: string;
@@ -48,5 +48,53 @@ describe('copyFileIfSourceNewer', () => {
     const sourceStat = fs.statSync(source);
     const targetStat = fs.statSync(target);
     expect(Math.abs(targetStat.mtimeMs - sourceStat.mtimeMs)).toBeLessThan(1);
+  });
+});
+
+describe('syncAgentWorkSkills', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-agentwork-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('copies skills from agentWorkSkillsDir into destSkillsDir', () => {
+    const agentWorkSkillsDir = path.join(tmpDir, 'agent-work', 'skills');
+    const destSkillsDir = path.join(tmpDir, 'dest-skills');
+
+    fs.mkdirSync(path.join(agentWorkSkillsDir, 'my-custom-skill'), { recursive: true });
+    fs.writeFileSync(path.join(agentWorkSkillsDir, 'my-custom-skill', 'SKILL.md'), '# Custom');
+
+    syncAgentWorkSkills(agentWorkSkillsDir, destSkillsDir);
+
+    expect(fs.existsSync(path.join(destSkillsDir, 'my-custom-skill', 'SKILL.md'))).toBe(true);
+  });
+
+  it('does nothing if agentWorkSkillsDir does not exist', () => {
+    const agentWorkSkillsDir = path.join(tmpDir, 'nonexistent');
+    const destSkillsDir = path.join(tmpDir, 'dest-skills');
+
+    expect(() => syncAgentWorkSkills(agentWorkSkillsDir, destSkillsDir)).not.toThrow();
+  });
+
+  it('agent-work skills overwrite built-in skills with the same name', () => {
+    const agentWorkSkillsDir = path.join(tmpDir, 'agent-work', 'skills');
+    const destSkillsDir = path.join(tmpDir, 'dest-skills');
+
+    // Pre-populate dest with a built-in skill
+    fs.mkdirSync(path.join(destSkillsDir, 'my-skill'), { recursive: true });
+    fs.writeFileSync(path.join(destSkillsDir, 'my-skill', 'SKILL.md'), '# Built-in');
+
+    // agent-work has an override
+    fs.mkdirSync(path.join(agentWorkSkillsDir, 'my-skill'), { recursive: true });
+    fs.writeFileSync(path.join(agentWorkSkillsDir, 'my-skill', 'SKILL.md'), '# Override');
+
+    syncAgentWorkSkills(agentWorkSkillsDir, destSkillsDir);
+
+    expect(fs.readFileSync(path.join(destSkillsDir, 'my-skill', 'SKILL.md'), 'utf-8')).toBe('# Override');
   });
 });

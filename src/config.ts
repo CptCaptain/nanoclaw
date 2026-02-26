@@ -12,6 +12,8 @@ const envConfig = readEnvFile([
   'TELEGRAM_BOT_TOKEN',
   'TELEGRAM_ONLY',
   'TELEGRAM_BOT_POOL',
+  'GITHUB_TOKEN',
+  'GITHUB_REPO',
 ]);
 
 export const ASSISTANT_NAME =
@@ -43,6 +45,7 @@ export const MOUNT_ALLOWLIST_PATH = path.join(
 export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
 export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
 export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const AGENT_WORK_DIR = path.resolve(PROJECT_ROOT, 'agent-work');
 export const MAIN_GROUP_FOLDER = 'main';
 
 export const CONTAINER_IMAGE =
@@ -88,3 +91,8 @@ export const TELEGRAM_BOT_POOL = (process.env.TELEGRAM_BOT_POOL || envConfig.TEL
   .split(',')
   .map((t) => t.trim())
   .filter(Boolean);
+
+export const GITHUB_TOKEN =
+  process.env.GITHUB_TOKEN || envConfig.GITHUB_TOKEN || '';
+export const GITHUB_REPO =
+  process.env.GITHUB_REPO || envConfig.GITHUB_REPO || 'CptCaptain/nanoclaw';

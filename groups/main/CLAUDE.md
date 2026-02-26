@@ -110,6 +110,68 @@ Key paths inside the container:
 - `/workspace/project/store/messages.db` (registered_groups table) - Group config
 - `/workspace/project/groups/` - All group folders
 
+## Versioned Workspace
+
+`/workspace/work` maps to `agent-work/` in the nanoclaw repository. This directory is **git-tracked** — everything you build here persists across sessions and can be versioned.
+
+| Path | Purpose |
+|------|---------|
+| `/workspace/work/integrations/` | Integrations you build (MCP servers, channel adapters) |
+| `/workspace/work/skills/` | Skills you write — available to you on the next container turn |
+| `/workspace/work/subagents/` | Output and artifacts from subagent work |
+
+**Rules:**
+- Build things in `/workspace/work`, not in `/workspace/group` (ephemeral, not versioned)
+- Skills you write to `/workspace/work/skills/` are available to you only (main group). To make a skill available to all groups, promote it to `container/skills/` via a PR.
+
+## Shipping Changes via IPC
+
+To version and ship your work, write task files to `/workspace/ipc/tasks/`:
+
+**Commit files:**
+```json
+{
+  "type": "git_commit",
+  "taskId": "commit-1",
+  "message": "feat: add home-assistant integration",
+  "paths": ["agent-work/integrations/home-assistant"]
+}
+```
+
+**Push a branch:**
+```json
+{
+  "type": "git_push",
+  "taskId": "push-1",
+  "branch": "feat/home-assistant-integration"
+}
+```
+
+**Open a PR:**
+```json
+{
+  "type": "create_pr",
+  "taskId": "pr-1",
+  "title": "feat: add Home Assistant MCP integration",
+  "body": "Adds an MCP server for Home Assistant...",
+  "branch": "feat/home-assistant-integration",
+  "base": "main"
+}
+```
+
+**Deploy after PR is merged:**
+```json
+{
+  "type": "deploy",
+  "taskId": "deploy-1"
+}
+```
+
+Results are written to `/workspace/ipc/input/{taskId}-result.json`. Always include a `taskId` so you can read the result.
+
+Allowed paths for `git_commit`: `agent-work/`, `container/skills/`, `groups/main/CLAUDE.md`.
+`git_push` cannot target `main` or `master`.
+
 ---
 
 ## Managing Groups

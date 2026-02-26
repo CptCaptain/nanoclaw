@@ -1,0 +1,16 @@
+{
+  "name": "home-assistant-integration",
+  "version": "1.0.0",
+  "description": "Home Assistant integration for NanoClaw",
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "test:watch": "node --import tsx --test --watch test/**/*.test.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0"
+  }
+}

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import {
   _initTestDatabase,
@@ -607,5 +607,107 @@ describe('register_group success', () => {
     );
 
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
+  });
+});
+
+// --- git_commit authorization ---
+
+describe('git_commit authorization', () => {
+  it('non-main group cannot trigger git_commit', async () => {
+    await processTaskIpc(
+      { type: 'git_commit', paths: ['agent-work/test'], message: 'test' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked — no errors thrown, no side effects
+  });
+
+  it('main group git_commit reaches the handler (not blocked by auth)', async () => {
+    // Import the module so we can spy on it
+    const hostOps = await import('./ipc-host-ops.js');
+    const spy = vi.spyOn(hostOps, 'handleGitCommit').mockResolvedValue({ success: false, error: 'mocked' });
+
+    await processTaskIpc(
+      { type: 'git_commit', paths: ['agent-work/test'], message: 'test' },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+});
+
+// --- git_push authorization ---
+
+describe('git_push authorization', () => {
+  it('non-main group cannot trigger git_push', async () => {
+    await processTaskIpc(
+      { type: 'git_push', branch: 'feat/test' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked
+  });
+
+  it('main group git_push reaches the handler (not blocked by auth)', async () => {
+    const hostOps = await import('./ipc-host-ops.js');
+    const spy = vi.spyOn(hostOps, 'handleGitPush').mockResolvedValue({ success: false, error: 'mocked' });
+
+    await processTaskIpc(
+      { type: 'git_push', branch: 'feat/test' },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+});
+
+// --- create_pr authorization ---
+
+describe('create_pr authorization', () => {
+  it('non-main group cannot trigger create_pr', async () => {
+    await processTaskIpc(
+      { type: 'create_pr', title: 'Test', body: 'Body', branch: 'feat/test', base: 'main' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked
+  });
+
+  it('main group create_pr reaches the handler (not blocked by auth)', async () => {
+    const hostOps = await import('./ipc-host-ops.js');
+    const spy = vi.spyOn(hostOps, 'handleCreatePr').mockResolvedValue({ success: false, error: 'mocked' });
+
+    await processTaskIpc(
+      { type: 'create_pr', title: 'Test', body: 'Body', branch: 'feat/test', base: 'main' },
+      'main',
+      true,
+      deps,
+    );
+
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+});
+
+// --- deploy authorization ---
+
+describe('deploy authorization', () => {
+  it('non-main group cannot trigger deploy', async () => {
+    await processTaskIpc(
+      { type: 'deploy' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked
   });
 });

@@ -5,10 +5,13 @@ import { CronExpressionParser } from 'cron-parser';
 
 import {
   DATA_DIR,
+  GITHUB_REPO,
+  GITHUB_TOKEN,
   IPC_POLL_INTERVAL,
   MAIN_GROUP_FOLDER,
   TIMEZONE,
 } from './config.js';
+import { handleGitCommit, handleGitPush, handleCreatePr, handleDeploy } from './ipc-host-ops.js';
 import { sendPoolMessage } from './channels/telegram.js';
 import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
@@ -28,6 +31,23 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+}
+
+function writeIpcResult(
+  groupFolder: string,
+  taskId: string | undefined,
+  result: { success: boolean; output?: string; error?: string; steps?: unknown },
+): void {
+  if (!taskId) return;
+  const resultPath = path.join(
+    DATA_DIR, 'ipc', groupFolder, 'input', `${taskId}-result.json`,
+  );
+  try {
+    fs.mkdirSync(path.dirname(resultPath), { recursive: true });
+    fs.writeFileSync(resultPath, JSON.stringify(result, null, 2));
+  } catch (err) {
+    logger.warn({ taskId, err }, 'Failed to write IPC result file');
+  }
 }
 
 let ipcWatcherRunning = false;
@@ -176,6 +196,14 @@ export async function processTaskIpc(
     trigger?: string;
     requiresTrigger?: boolean;
     containerConfig?: RegisteredGroup['containerConfig'];
+    // For git_commit
+    paths?: unknown;
+    message?: unknown;
+    // For git_push / create_pr
+    branch?: unknown;
+    title?: unknown;
+    body?: unknown;
+    base?: unknown;
   },
   sourceGroup: string, // Verified identity from IPC directory
   isMain: boolean, // Verified from directory path
@@ -418,6 +446,56 @@ export async function processTaskIpc(
         );
       }
       break;
+
+    case 'git_commit': {
+      if (!isMain) {
+        logger.warn({ groupFolder: sourceGroup }, 'Non-main group attempted git_commit — blocked');
+        break;
+      }
+      const result = await handleGitCommit(
+        data as { paths: unknown; message: unknown },
+        process.cwd(),
+      );
+      writeIpcResult(sourceGroup, data.taskId as string | undefined, result);
+      break;
+    }
+
+    case 'git_push': {
+      if (!isMain) {
+        logger.warn({ groupFolder: sourceGroup }, 'Non-main group attempted git_push — blocked');
+        break;
+      }
+      const result = await handleGitPush(
+        data as { branch: unknown },
+        process.cwd(),
+      );
+      writeIpcResult(sourceGroup, data.taskId as string | undefined, result);
+      break;
+    }
+
+    case 'create_pr': {
+      if (!isMain) {
+        logger.warn({ groupFolder: sourceGroup }, 'Non-main group attempted create_pr — blocked');
+        break;
+      }
+      const result = await handleCreatePr(
+        data as { title: unknown; body: unknown; branch: unknown; base: unknown },
+        GITHUB_TOKEN,
+        GITHUB_REPO,
+      );
+      writeIpcResult(sourceGroup, data.taskId as string | undefined, result);
+      break;
+    }
+
+    case 'deploy': {
+      if (!isMain) {
+        logger.warn({ groupFolder: sourceGroup }, 'Non-main group attempted deploy — blocked');
+        break;
+      }
+      const result = await handleDeploy(process.cwd());
+      writeIpcResult(sourceGroup, data.taskId as string | undefined, result);
+      break;
+    }
 
     default:
       logger.warn({ type: data.type }, 'Unknown IPC task type');

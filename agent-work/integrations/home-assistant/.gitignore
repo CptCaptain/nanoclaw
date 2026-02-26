@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+
+# Sensitive files - NEVER commit these!
+config.json
+.env
+*.token
+**/secrets.*
