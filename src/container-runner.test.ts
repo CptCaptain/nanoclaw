@@ -205,8 +205,8 @@ describe('container-runner timeout behavior', () => {
   });
 });
 
-describe('buildVolumeMounts agent-work', () => {
-  it('mounts agent-work/ read-write for main group at /workspace/work', () => {
+describe('AGENT_WORK_DIR config export', () => {
+  it('is an absolute path containing agent-work', () => {
     expect(AGENT_WORK_DIR).toContain('agent-work');
     expect(path.isAbsolute(AGENT_WORK_DIR)).toBe(true);
   });

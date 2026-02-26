@@ -302,10 +302,9 @@ function buildVolumeMounts(
 
     // agent-work/: git-tracked versioned workspace for Klaus-built integrations,
     // skills, and subagent output. Main-only — non-main groups have no persistent workspace.
-    const agentWorkDir = path.resolve(process.cwd(), 'agent-work');
-    fs.mkdirSync(agentWorkDir, { recursive: true });
+    fs.mkdirSync(AGENT_WORK_DIR, { recursive: true });
     mounts.push({
-      hostPath: agentWorkDir,
+      hostPath: AGENT_WORK_DIR,
       containerPath: '/workspace/work',
       readonly: false,
     });
