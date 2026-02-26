@@ -1,4 +1,4 @@
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import path from 'path';
 
 import { logger } from './logger.js';
@@ -149,9 +149,10 @@ export async function handleGitCommit(
   }
 }
 
-interface DeployStep {
+export interface DeployStep {
   name: string;
-  cmd: string;
+  file: string;
+  args: string[];
 }
 
 interface DeployResult {
@@ -168,7 +169,7 @@ export async function handleDeployWithCommands(
 
   for (const step of steps) {
     try {
-      const output = execSync(step.cmd, { cwd, encoding: 'utf-8' });
+      const output = execFileSync(step.file, step.args, { cwd, encoding: 'utf-8' });
       results.push({ name: step.name, success: true, output });
       logger.info({ step: step.name }, 'Deploy step succeeded');
     } catch (err) {
@@ -184,10 +185,10 @@ export async function handleDeployWithCommands(
 
 export async function handleDeploy(cwd: string = process.cwd()): Promise<DeployResult> {
   const steps: DeployStep[] = [
-    { name: 'git_pull', cmd: 'git pull --rebase origin main' },
-    { name: 'npm_install', cmd: 'npm install' },
-    { name: 'migrations', cmd: 'echo "no migrations"' },
-    { name: 'build', cmd: 'npm run build' },
+    { name: 'git_pull', file: 'git', args: ['pull', '--rebase', 'origin', 'main'] },
+    { name: 'npm_install', file: 'npm', args: ['install'] },
+    { name: 'migrations', file: 'echo', args: ['no migrations'] },
+    { name: 'build', file: 'npm', args: ['run', 'build'] },
   ];
 
   const result = await handleDeployWithCommands(steps, cwd);

@@ -160,8 +160,8 @@ describe('handleDeployWithCommands', () => {
   it('returns success when all steps succeed', async () => {
     const result = await handleDeployWithCommands(
       [
-        { name: 'step1', cmd: 'echo ok' },
-        { name: 'step2', cmd: 'echo also ok' },
+        { name: 'step1', file: 'echo', args: ['ok'] },
+        { name: 'step2', file: 'echo', args: ['also ok'] },
       ],
       tmpDir,
     );
@@ -174,9 +174,9 @@ describe('handleDeployWithCommands', () => {
   it('stops on first failure and does not run subsequent steps', async () => {
     const result = await handleDeployWithCommands(
       [
-        { name: 'step1', cmd: 'echo ok' },
-        { name: 'step2', cmd: 'exit 1' },
-        { name: 'step3', cmd: 'echo should-not-run' },
+        { name: 'step1', file: 'echo', args: ['ok'] },
+        { name: 'step2', file: 'false', args: [] },
+        { name: 'step3', file: 'echo', args: ['should-not-run'] },
       ],
       tmpDir,
     );
