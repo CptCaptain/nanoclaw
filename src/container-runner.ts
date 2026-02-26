@@ -115,6 +115,22 @@ export function copyFileIfSourceNewer(sourcePath: string, targetPath: string): b
   return true;
 }
 
+export function syncAgentWorkSkills(agentWorkSkillsDir: string, destSkillsDir: string): void {
+  if (!fs.existsSync(agentWorkSkillsDir)) return;
+
+  for (const skillDir of fs.readdirSync(agentWorkSkillsDir)) {
+    const srcDir = path.join(agentWorkSkillsDir, skillDir);
+    if (!fs.statSync(srcDir).isDirectory()) continue;
+    const dstDir = path.join(destSkillsDir, skillDir);
+    try {
+      const stat = fs.lstatSync(dstDir);
+      if (stat.isSymbolicLink()) fs.unlinkSync(dstDir);
+      else if (stat.isDirectory()) fs.rmSync(dstDir, { recursive: true });
+    } catch { /* doesn't exist yet */ }
+    fs.cpSync(srcDir, dstDir, { recursive: true });
+  }
+}
+
 function latestMtimeRecursive(dirPath: string): number {
   if (!fs.existsSync(dirPath)) return 0;
 
@@ -375,6 +391,13 @@ function buildVolumeMounts(
       fs.cpSync(srcDir, dstDir, { recursive: true });
     }
   }
+
+  // Merge agent-work/skills/ on top of built-in skills (main group only)
+  if (isMain) {
+    const agentWorkSkillsDir = path.join(process.cwd(), 'agent-work', 'skills');
+    syncAgentWorkSkills(agentWorkSkillsDir, skillsDst);
+  }
+
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
