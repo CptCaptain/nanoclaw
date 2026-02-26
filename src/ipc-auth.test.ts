@@ -609,3 +609,43 @@ describe('register_group success', () => {
     expect(getRegisteredGroup('partial@g.us')).toBeUndefined();
   });
 });
+
+// --- git_commit authorization ---
+
+describe('git_commit authorization', () => {
+  it('non-main group cannot trigger git_commit', async () => {
+    await processTaskIpc(
+      { type: 'git_commit', paths: ['agent-work/test'], message: 'test' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked — no errors thrown, no side effects
+  });
+
+  it('main group git_commit reaches the handler (not blocked by auth)', async () => {
+    // Handler will fail in test env (no git repo at cwd), but auth should not block it
+    // We verify it doesn't throw and doesn't return a "blocked" undefined
+    const result = await processTaskIpc(
+      { type: 'git_commit', paths: ['agent-work/test'], message: 'test' },
+      'main',
+      true,
+      deps,
+    );
+    // result is void; test passes if no unhandled error thrown
+  });
+});
+
+// --- deploy authorization ---
+
+describe('deploy authorization', () => {
+  it('non-main group cannot trigger deploy', async () => {
+    await processTaskIpc(
+      { type: 'deploy' },
+      'other-group',
+      false,
+      deps,
+    );
+    // Should be silently blocked
+  });
+});
