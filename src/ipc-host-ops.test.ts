@@ -6,6 +6,7 @@ import { execSync } from 'child_process';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { handleGitCommit, ALLOWED_COMMIT_PATHS } from './ipc-host-ops.js';
+import { handleGitPush, handleCreatePr } from './ipc-host-ops.js';
 
 describe('handleGitCommit', () => {
   let tmpDir: string;
@@ -69,5 +70,73 @@ describe('ALLOWED_COMMIT_PATHS', () => {
     expect(ALLOWED_COMMIT_PATHS).toContain('agent-work/');
     expect(ALLOWED_COMMIT_PATHS).toContain('container/skills/');
     expect(ALLOWED_COMMIT_PATHS).toContain('groups/main/CLAUDE.md');
+  });
+});
+
+describe('handleGitPush', () => {
+  it('rejects push to main', async () => {
+    const result = await handleGitPush({ branch: 'main' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/cannot push to main/i);
+  });
+
+  it('rejects push to master', async () => {
+    const result = await handleGitPush({ branch: 'master' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/cannot push to main/i);
+  });
+
+  it('rejects missing branch', async () => {
+    const result = await handleGitPush({ branch: undefined });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/branch/i);
+  });
+
+  it('rejects empty branch name', async () => {
+    const result = await handleGitPush({ branch: '' });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/branch/i);
+  });
+});
+
+describe('handleCreatePr', () => {
+  it('rejects missing GITHUB_TOKEN', async () => {
+    const result = await handleCreatePr(
+      { title: 'Test', body: 'Body', branch: 'feat/test', base: 'main' },
+      '',
+      'CptCaptain/nanoclaw',
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/GITHUB_TOKEN/i);
+  });
+
+  it('rejects missing GITHUB_REPO', async () => {
+    const result = await handleCreatePr(
+      { title: 'Test', body: 'Body', branch: 'feat/test', base: 'main' },
+      'ghp_fake',
+      '',
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/GITHUB_REPO/i);
+  });
+
+  it('rejects missing title', async () => {
+    const result = await handleCreatePr(
+      { title: '', body: 'Body', branch: 'feat/test', base: 'main' },
+      'ghp_fake',
+      'CptCaptain/nanoclaw',
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/title/i);
+  });
+
+  it('rejects empty branch', async () => {
+    const result = await handleCreatePr(
+      { title: 'feat', body: 'body', branch: '', base: 'main' },
+      'ghp_fake',
+      'CptCaptain/nanoclaw',
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/branch/i);
   });
 });

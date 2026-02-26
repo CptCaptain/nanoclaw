@@ -23,6 +23,84 @@ function isPathAllowed(filePath: string): boolean {
   );
 }
 
+const PROTECTED_BRANCHES = new Set(['main', 'master']);
+
+export async function handleGitPush(
+  data: { branch: unknown },
+  cwd: string = process.cwd(),
+): Promise<HostOpResult> {
+  const { branch } = data;
+
+  if (typeof branch !== 'string' || !branch.trim()) {
+    return { success: false, error: 'branch must be a non-empty string' };
+  }
+  if (PROTECTED_BRANCHES.has(branch.trim())) {
+    return { success: false, error: `Cannot push to main/master branch via IPC. Use a feature branch.` };
+  }
+
+  try {
+    const b = branch.trim();
+    const output = execSync(
+      `git push origin HEAD:refs/heads/${b} --set-upstream`,
+      { cwd },
+    ).toString();
+    logger.info({ branch: b }, 'IPC git_push succeeded');
+    return { success: true, output };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.warn({ branch, error }, 'IPC git_push failed');
+    return { success: false, error };
+  }
+}
+
+export async function handleCreatePr(
+  data: { title: unknown; body: unknown; branch: unknown; base: unknown },
+  githubToken: string,
+  githubRepo: string,
+): Promise<HostOpResult> {
+  if (!githubToken) return { success: false, error: 'GITHUB_TOKEN is not configured' };
+  if (!githubRepo) return { success: false, error: 'GITHUB_REPO is not configured' };
+
+  const { title, body, branch, base } = data;
+  if (typeof title !== 'string' || !title.trim()) {
+    return { success: false, error: 'title must be a non-empty string' };
+  }
+  if (typeof branch !== 'string' || !branch.trim()) {
+    return { success: false, error: 'branch must be a non-empty string' };
+  }
+  const prBase = typeof base === 'string' && base.trim() ? base.trim() : 'main';
+
+  try {
+    const response = await fetch(`https://api.github.com/repos/${githubRepo}/pulls`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${githubToken}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: title.trim(),
+        body: typeof body === 'string' ? body : '',
+        head: branch.trim(),
+        base: prBase,
+      }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { success: false, error: `GitHub API error ${response.status}: ${text}` };
+    }
+
+    const pr = await response.json() as { html_url: string; number: number };
+    logger.info({ pr: pr.number, url: pr.html_url }, 'IPC create_pr succeeded');
+    return { success: true, output: `PR #${pr.number}: ${pr.html_url}` };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    logger.warn({ branch, error }, 'IPC create_pr failed');
+    return { success: false, error };
+  }
+}
+
 export async function handleGitCommit(
   data: { paths: unknown; message: unknown },
   cwd: string = process.cwd(),
