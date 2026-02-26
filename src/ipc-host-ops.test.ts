@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { handleGitCommit, ALLOWED_COMMIT_PATHS } from './ipc-host-ops.js';
 import { handleGitPush, handleCreatePr } from './ipc-host-ops.js';
+import { handleDeployWithCommands } from './ipc-host-ops.js';
 
 describe('handleGitCommit', () => {
   let tmpDir: string;
@@ -138,5 +139,46 @@ describe('handleCreatePr', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/branch/i);
+  });
+});
+
+describe('handleDeployWithCommands', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-deploy-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns success when all steps succeed', async () => {
+    const result = await handleDeployWithCommands(
+      [
+        { name: 'step1', cmd: 'echo ok' },
+        { name: 'step2', cmd: 'echo also ok' },
+      ],
+      tmpDir,
+    );
+    expect(result.success).toBe(true);
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps![0].success).toBe(true);
+    expect(result.steps![1].success).toBe(true);
+  });
+
+  it('stops on first failure and does not run subsequent steps', async () => {
+    const result = await handleDeployWithCommands(
+      [
+        { name: 'step1', cmd: 'echo ok' },
+        { name: 'step2', cmd: 'exit 1' },
+        { name: 'step3', cmd: 'echo should-not-run' },
+      ],
+      tmpDir,
+    );
+    expect(result.success).toBe(false);
+    expect(result.steps).toHaveLength(2);
+    expect(result.steps![0].success).toBe(true);
+    expect(result.steps![1].success).toBe(false);
   });
 });

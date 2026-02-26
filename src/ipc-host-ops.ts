@@ -145,3 +145,54 @@ export async function handleGitCommit(
     return { success: false, error };
   }
 }
+
+interface DeployStep {
+  name: string;
+  cmd: string;
+}
+
+interface DeployResult {
+  success: boolean;
+  steps?: Array<{ name: string; success: boolean; output?: string; error?: string }>;
+  error?: string;
+}
+
+export async function handleDeployWithCommands(
+  steps: DeployStep[],
+  cwd: string,
+): Promise<DeployResult> {
+  const results: Array<{ name: string; success: boolean; output?: string; error?: string }> = [];
+
+  for (const step of steps) {
+    try {
+      const output = execSync(step.cmd, { cwd, encoding: 'utf-8' });
+      results.push({ name: step.name, success: true, output });
+      logger.info({ step: step.name }, 'Deploy step succeeded');
+    } catch (err) {
+      const error = err instanceof Error ? err.message : String(err);
+      results.push({ name: step.name, success: false, error });
+      logger.error({ step: step.name, error }, 'Deploy step failed — aborting');
+      return { success: false, steps: results };
+    }
+  }
+
+  return { success: true, steps: results };
+}
+
+export async function handleDeploy(cwd: string = process.cwd()): Promise<DeployResult> {
+  const steps: DeployStep[] = [
+    { name: 'git_pull', cmd: 'git pull --rebase origin main' },
+    { name: 'npm_install', cmd: 'npm install' },
+    { name: 'migrations', cmd: 'echo "no migrations"' },
+    { name: 'build', cmd: 'npm run build' },
+  ];
+
+  const result = await handleDeployWithCommands(steps, cwd);
+
+  if (result.success) {
+    logger.info('Deploy pipeline succeeded — scheduling restart');
+    setTimeout(() => process.exit(0), 500);
+  }
+
+  return result;
+}
