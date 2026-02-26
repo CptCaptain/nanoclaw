@@ -1,5 +1,9 @@
 # Dependencies
 node_modules/
+
+# agent-work — exclude nested node_modules but track everything else
+agent-work/**/node_modules/
+agent-work/**/.git/
 .npm-cache/
 # Build output
 dist/
