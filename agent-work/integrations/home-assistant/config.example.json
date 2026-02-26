@@ -1,0 +1,4 @@
+{
+  "baseUrl": "http://homeassistant.local:8123",
+  "accessToken": "YOUR_LONG_LIVED_ACCESS_TOKEN_HERE"
+}
