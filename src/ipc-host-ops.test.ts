@@ -5,9 +5,13 @@ import { execSync } from 'child_process';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { handleGitCommit, ALLOWED_COMMIT_PATHS } from './ipc-host-ops.js';
-import { handleGitPush, handleCreatePr } from './ipc-host-ops.js';
-import { handleDeployWithCommands } from './ipc-host-ops.js';
+import {
+  handleGitCommit,
+  handleGitPush,
+  handleCreatePr,
+  handleDeployWithCommands,
+  ALLOWED_COMMIT_PATHS,
+} from './ipc-host-ops.js';
 
 describe('handleGitCommit', () => {
   let tmpDir: string;

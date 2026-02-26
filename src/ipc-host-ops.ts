@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import path from 'path';
 
 import { logger } from './logger.js';
@@ -18,9 +18,16 @@ export interface HostOpResult {
 function isPathAllowed(filePath: string): boolean {
   const normalized = path.normalize(filePath);
   if (normalized.startsWith('..') || path.isAbsolute(normalized)) return false;
-  return ALLOWED_COMMIT_PATHS.some(
-    (allowed) => normalized === allowed || normalized.startsWith(allowed),
-  );
+  for (const allowed of ALLOWED_COMMIT_PATHS) {
+    if (allowed.endsWith('/')) {
+      // Directory prefix: match the directory itself or anything inside it
+      if (normalized === allowed.slice(0, -1) || normalized.startsWith(allowed)) return true;
+    } else {
+      // Exact file: only exact match
+      if (normalized === allowed) return true;
+    }
+  }
+  return false;
 }
 
 const PROTECTED_BRANCHES = new Set(['main', 'master']);
@@ -40,10 +47,7 @@ export async function handleGitPush(
 
   try {
     const b = branch.trim();
-    const output = execSync(
-      `git push origin HEAD:refs/heads/${b} --set-upstream`,
-      { cwd },
-    ).toString();
+    const output = execFileSync('git', ['push', 'origin', `HEAD:refs/heads/${b}`, '--set-upstream'], { cwd }).toString();
     logger.info({ branch: b }, 'IPC git_push succeeded');
     return { success: true, output };
   } catch (err) {
@@ -124,19 +128,18 @@ export async function handleGitCommit(
   }
 
   try {
-    const addArgs = paths.map((p) => `"${p}"`).join(' ');
     try {
-      execSync(`git add ${addArgs}`, { cwd });
+      execFileSync('git', ['add', '--', ...(paths as string[])], { cwd });
     } catch {
       // git add fails when pathspecs match no files; fall through to staged check
     }
 
-    const staged = execSync('git diff --cached --name-only', { cwd }).toString().trim();
+    const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd }).toString().trim();
     if (!staged) {
       return { success: false, error: 'Nothing to commit — no changes staged in the specified paths.' };
     }
 
-    const output = execSync(`git commit -m ${JSON.stringify(message.trim())}`, { cwd }).toString();
+    const output = execFileSync('git', ['commit', '-m', message.trim()], { cwd }).toString();
     logger.info({ paths, message }, 'IPC git_commit succeeded');
     return { success: true, output };
   } catch (err) {
