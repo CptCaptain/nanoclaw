@@ -5,7 +5,7 @@ import sys
 import uuid
 from typing import Any, Callable
 
-from commands import health, service
+from commands import catalog, health, service
 from config import ConfigError, load_config
 from ha_client import HomeAssistantApiError, HomeAssistantClient
 
@@ -14,6 +14,9 @@ CommandHandler = Callable[[dict[str, Any], HomeAssistantClient], dict[str, Any]]
 COMMANDS: dict[str, CommandHandler] = {
     'health.check': health.handle,
     'service.call': service.handle,
+    'catalog.refresh': catalog.handle_refresh,
+    'catalog.get': catalog.handle_get,
+    'catalog.find': catalog.handle_find,
 }
 
 
