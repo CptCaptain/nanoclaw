@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from commands import catalog, climate, health, light, media, memory, scene, service
+from commands import catalog, climate, health, light, maint, media, memory, scene, service
 from config import ConfigError, load_config
 from ha_client import HomeAssistantApiError, HomeAssistantClient
 from safety import ConfirmationRequiredError
@@ -33,6 +33,7 @@ COMMANDS: dict[str, CommandSpec] = {
     'memory.read': CommandSpec(memory.handle_read, requires_client=False),
     'memory.append_note': CommandSpec(memory.handle_append_note, requires_client=False),
     'memory.replace_section': CommandSpec(memory.handle_replace_section, requires_client=False),
+    'maint.refresh_and_sync': CommandSpec(maint.handle_refresh_and_sync),
 }
 
 
