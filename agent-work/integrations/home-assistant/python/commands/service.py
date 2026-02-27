@@ -1,4 +1,5 @@
 from ha_client import HomeAssistantClient
+from safety import require_confirmation_if_needed
 
 
 def _require_text(payload: dict, key: str) -> str:
@@ -24,6 +25,8 @@ def handle(payload: dict, client: HomeAssistantClient) -> dict:
         raise ValueError('"target" must be an object when provided')
     if not isinstance(data, dict):
         raise ValueError('"data" must be an object when provided')
+
+    require_confirmation_if_needed(domain, service, payload)
 
     body = {**target, **data}
     result = client.post(f'/api/services/{domain}/{service}', body if body else None)

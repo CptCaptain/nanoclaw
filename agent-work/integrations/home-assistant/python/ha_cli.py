@@ -5,9 +5,10 @@ import sys
 import uuid
 from typing import Any, Callable
 
-from commands import catalog, health, service
+from commands import catalog, climate, health, light, media, scene, service
 from config import ConfigError, load_config
 from ha_client import HomeAssistantApiError, HomeAssistantClient
+from safety import ConfirmationRequiredError
 
 CommandHandler = Callable[[dict[str, Any], HomeAssistantClient], dict[str, Any]]
 
@@ -17,6 +18,10 @@ COMMANDS: dict[str, CommandHandler] = {
     'catalog.refresh': catalog.handle_refresh,
     'catalog.get': catalog.handle_get,
     'catalog.find': catalog.handle_find,
+    'light.set': light.handle,
+    'climate.set': climate.handle,
+    'scene.activate': scene.handle,
+    'media.control': media.handle,
 }
 
 
@@ -92,6 +97,10 @@ def main() -> int:
         response = error_envelope(args.command, request_id, 'VALIDATION_ERROR', str(exc))
         print(json.dumps(response))
         return 2
+    except ConfirmationRequiredError as exc:
+        response = error_envelope(args.command, request_id, 'CONFIRMATION_REQUIRED', str(exc))
+        print(json.dumps(response))
+        return 4
     except HomeAssistantApiError as exc:
         response = error_envelope(args.command, request_id, 'HOME_ASSISTANT_ERROR', str(exc))
         print(json.dumps(response))
