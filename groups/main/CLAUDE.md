@@ -123,6 +123,7 @@ Key paths inside the container:
 **Rules:**
 - Build things in `/workspace/work`, not in `/workspace/group` (ephemeral, not versioned)
 - Skills you write to `/workspace/work/skills/` are available to you only (main group). To make a skill available to all groups, promote it to `container/skills/` via a PR.
+- For Home Assistant requests, use the `home-assistant` skill at `/workspace/work/skills/home-assistant/SKILL.md` and run the Python CLI at `/workspace/work/integrations/home-assistant/python/ha_cli.py`.
 
 ## Shipping Changes via IPC
 
