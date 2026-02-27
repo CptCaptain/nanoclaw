@@ -7,3 +7,7 @@ config.json
 .env
 *.token
 **/secrets.*
+
+# Python
+__pycache__/
+*.pyc
