@@ -40,3 +40,6 @@ groups/global/*
 .worktrees/
 
 agents-sdk-docs
+
+# Pi local agent harness artifacts
+.pi/logs/

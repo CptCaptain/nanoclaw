@@ -848,6 +848,63 @@ describe('TelegramChannel', () => {
         channel.setTyping('tg:100200300', true),
       ).resolves.toBeUndefined();
     });
+
+    it('keeps typing indicator alive until stopped', async () => {
+      vi.useFakeTimers();
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        await channel.setTyping('tg:100200300', true);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(2);
+
+        await channel.setTyping('tg:100200300', false);
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not create duplicate typing heartbeats', async () => {
+      vi.useFakeTimers();
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        await channel.setTyping('tg:100200300', true);
+        await channel.setTyping('tg:100200300', true);
+
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stops typing heartbeat when a message is sent', async () => {
+      vi.useFakeTimers();
+      try {
+        const opts = createTestOpts();
+        const channel = new TelegramChannel('test-token', opts);
+        await channel.connect();
+
+        await channel.setTyping('tg:100200300', true);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+
+        await channel.sendMessage('tg:100200300', 'done');
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(currentBot().api.sendChatAction).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // --- Bot commands ---

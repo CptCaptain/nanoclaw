@@ -14,6 +14,7 @@ const poolApis: Api[] = [];
 // Maps "{groupFolder}:{senderName}" → pool Api index for stable assignment
 const senderBotMap = new Map<string, number>();
 let nextPoolIndex = 0;
+const TELEGRAM_TYPING_HEARTBEAT_MS = 4000;
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -27,6 +28,7 @@ export class TelegramChannel implements Channel {
   private bot: Bot | null = null;
   private opts: TelegramChannelOpts;
   private botToken: string;
+  private typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
 
   constructor(botToken: string, opts: TelegramChannelOpts) {
     this.botToken = botToken;
@@ -200,6 +202,7 @@ export class TelegramChannel implements Channel {
     }
 
     try {
+      this.stopTypingHeartbeat(jid);
       const numericId = jid.replace(/^tg:/, '');
 
       // Telegram has a 4096 character limit per message — split if needed
@@ -229,6 +232,7 @@ export class TelegramChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    this.stopAllTypingHeartbeats();
     if (this.bot) {
       this.bot.stop();
       this.bot = null;
@@ -237,13 +241,46 @@ export class TelegramChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.bot || !isTyping) return;
+    if (!this.bot) return;
+
+    if (!isTyping) {
+      this.stopTypingHeartbeat(jid);
+      return;
+    }
+
+    if (this.typingHeartbeats.has(jid)) return;
+
+    await this.sendTypingAction(jid);
+
+    const heartbeat = setInterval(() => {
+      void this.sendTypingAction(jid);
+    }, TELEGRAM_TYPING_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    this.typingHeartbeats.set(jid, heartbeat);
+  }
+
+  private async sendTypingAction(jid: string): Promise<void> {
+    if (!this.bot) return;
     try {
       const numericId = jid.replace(/^tg:/, '');
       await this.bot.api.sendChatAction(numericId, 'typing');
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Telegram typing indicator');
     }
+  }
+
+  private stopTypingHeartbeat(jid: string): void {
+    const heartbeat = this.typingHeartbeats.get(jid);
+    if (!heartbeat) return;
+    clearInterval(heartbeat);
+    this.typingHeartbeats.delete(jid);
+  }
+
+  private stopAllTypingHeartbeats(): void {
+    for (const heartbeat of this.typingHeartbeats.values()) {
+      clearInterval(heartbeat);
+    }
+    this.typingHeartbeats.clear();
   }
 }
 
