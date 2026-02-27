@@ -3,25 +3,36 @@ import argparse
 import json
 import sys
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable
 
-from commands import catalog, climate, health, light, media, scene, service
+from commands import catalog, climate, health, light, media, memory, scene, service
 from config import ConfigError, load_config
 from ha_client import HomeAssistantApiError, HomeAssistantClient
 from safety import ConfirmationRequiredError
 
-CommandHandler = Callable[[dict[str, Any], HomeAssistantClient], dict[str, Any]]
+CommandHandler = Callable[[dict[str, Any], HomeAssistantClient | None], dict[str, Any]]
 
-COMMANDS: dict[str, CommandHandler] = {
-    'health.check': health.handle,
-    'service.call': service.handle,
-    'catalog.refresh': catalog.handle_refresh,
-    'catalog.get': catalog.handle_get,
-    'catalog.find': catalog.handle_find,
-    'light.set': light.handle,
-    'climate.set': climate.handle,
-    'scene.activate': scene.handle,
-    'media.control': media.handle,
+
+@dataclass(frozen=True)
+class CommandSpec:
+    handler: CommandHandler
+    requires_client: bool = True
+
+
+COMMANDS: dict[str, CommandSpec] = {
+    'health.check': CommandSpec(health.handle),
+    'service.call': CommandSpec(service.handle),
+    'catalog.refresh': CommandSpec(catalog.handle_refresh),
+    'catalog.get': CommandSpec(catalog.handle_get, requires_client=False),
+    'catalog.find': CommandSpec(catalog.handle_find, requires_client=False),
+    'light.set': CommandSpec(light.handle),
+    'climate.set': CommandSpec(climate.handle),
+    'scene.activate': CommandSpec(scene.handle),
+    'media.control': CommandSpec(media.handle),
+    'memory.read': CommandSpec(memory.handle_read, requires_client=False),
+    'memory.append_note': CommandSpec(memory.handle_append_note, requires_client=False),
+    'memory.replace_section': CommandSpec(memory.handle_replace_section, requires_client=False),
 }
 
 
@@ -76,8 +87,8 @@ def main() -> int:
         print(json.dumps(response))
         return 2
 
-    command_handler = COMMANDS.get(args.command)
-    if command_handler is None:
+    command_spec = COMMANDS.get(args.command)
+    if command_spec is None:
         response = error_envelope(
             args.command,
             request_id,
@@ -88,9 +99,12 @@ def main() -> int:
         return 2
 
     try:
-        config = load_config()
-        client = HomeAssistantClient(config)
-        data = command_handler(payload, client)
+        client: HomeAssistantClient | None = None
+        if command_spec.requires_client:
+            config = load_config()
+            client = HomeAssistantClient(config)
+
+        data = command_spec.handler(payload, client)
         print(json.dumps(success_envelope(args.command, request_id, data)))
         return 0
     except (ConfigError, ValueError) as exc:
